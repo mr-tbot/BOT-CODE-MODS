@@ -1,17 +1,14 @@
 #Requires -Version 5.1
 <#
   BOT-CODE-MODS installer (Windows).
-  Installs a persistent system prompt into Claude Code and VS Code Chat / Copilot. Optionally applies
-  an accent-colored theme and/or the caveman compression mode.
+  Installs a persistent system prompt into Claude Code and VS Code Chat / Copilot. Optionally installs
+  the caveman compression mode.
 
   Examples:
     powershell -ExecutionPolicy Bypass -File .\install.ps1
-    powershell -ExecutionPolicy Bypass -File .\install.ps1 -Theme -AccentColor "#3B82F6"
-    powershell -ExecutionPolicy Bypass -File .\install.ps1 -Theme -Caveman
+    powershell -ExecutionPolicy Bypass -File .\install.ps1 -Caveman
 #>
 param(
-    [switch]$Theme,
-    [string]$AccentColor,
     [switch]$Caveman,
     [string]$PromptFile
 )
@@ -65,25 +62,7 @@ foreach ($u in $found) {
     Write-Host "[ok] VS Code Chat -> $target" -ForegroundColor Green
 }
 
-# --- 3. Optional theme (selectable accent color) ---
-if ($Theme) {
-    if (Get-Command node -ErrorAction SilentlyContinue) {
-        if (-not $AccentColor) {
-            $AccentColor = Read-Host "Accent color hex (e.g. #3B82F6), blank for default"
-            if (-not $AccentColor) { $AccentColor = '#3B82F6' }
-        }
-        foreach ($u in $found) {
-            $settings = Join-Path $u 'settings.json'
-            Backup-IfExists $settings
-            & node (Join-Path $root 'make-theme.js') $AccentColor $settings
-        }
-        Write-Host "[ok] Theme applied (accent $AccentColor)" -ForegroundColor Green
-    } else {
-        Write-Host "  [warn] node not found; theme skipped. Install Node then re-run with -Theme." -ForegroundColor Yellow
-    }
-}
-
-# --- 4. Optional caveman compression mode (third-party, public) ---
+# --- 3. Optional caveman compression mode (third-party, public) ---
 if ($Caveman) {
     if (Get-Command node -ErrorAction SilentlyContinue) {
         Write-Host "[*] Installing caveman (github.com/JuliusBrussee/caveman)..." -ForegroundColor Cyan

@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
 # BOT-CODE-MODS installer (macOS / Linux).
-# Installs a persistent system prompt into Claude Code and VS Code Chat / Copilot. Optionally applies
-# an accent-colored theme and/or the caveman compression mode.
+# Installs a persistent system prompt into Claude Code and VS Code Chat / Copilot. Optionally installs
+# the caveman compression mode.
 #
 # Examples:
 #   bash install.sh
-#   bash install.sh --theme --accent "#3B82F6"
-#   bash install.sh --theme --caveman
+#   bash install.sh --caveman
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-THEME=0; CAVEMAN=0; ACCENT=""; PROMPT_FILE="$ROOT/system-prompt.md"
+CAVEMAN=0; PROMPT_FILE="$ROOT/system-prompt.md"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --theme) THEME=1 ;;
     --caveman) CAVEMAN=1 ;;
-    --accent) shift; ACCENT="${1:-}" ;;
     --prompt) shift; PROMPT_FILE="${1:-}" ;;
     *) echo "unknown option: $1" ;;
   esac
@@ -50,21 +47,7 @@ for u in "${FOUND[@]}"; do
   echo "[ok] VS Code Chat -> $target"
 done
 
-# 3. Optional theme (selectable accent color)
-if [ "$THEME" = 1 ]; then
-  if command -v node >/dev/null 2>&1; then
-    if [ -z "$ACCENT" ]; then printf 'Accent color hex (e.g. #3B82F6), blank for default: '; read -r ACCENT; [ -z "$ACCENT" ] && ACCENT="#3B82F6"; fi
-    for u in "${FOUND[@]}"; do
-      backup_if_exists "$u/settings.json"
-      node "$ROOT/make-theme.js" "$ACCENT" "$u/settings.json"
-    done
-    echo "[ok] Theme applied (accent $ACCENT)"
-  else
-    echo "  [warn] node not found; theme skipped. Install Node then re-run with --theme."
-  fi
-fi
-
-# 4. Optional caveman compression mode (third-party, public)
+# 3. Optional caveman compression mode (third-party, public)
 if [ "$CAVEMAN" = 1 ]; then
   if command -v node >/dev/null 2>&1; then
     echo "[*] Installing caveman (github.com/JuliusBrussee/caveman)..."
