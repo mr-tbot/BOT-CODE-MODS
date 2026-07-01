@@ -10,7 +10,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-THEME=0; CAVEMAN=0; ACCENT=""; PROMPT_FILE="$ROOT/instructions.md"
+THEME=0; CAVEMAN=0; ACCENT=""; PROMPT_FILE="$ROOT/system-prompt.md"
 while [ $# -gt 0 ]; do
   case "$1" in
     --theme) THEME=1 ;;

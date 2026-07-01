@@ -31,7 +31,7 @@ function Backup-IfExists([string]$Path) {
 }
 
 # --- load the prompt ---
-$instrPath = if ($PromptFile) { $PromptFile } else { Join-Path $root 'instructions.md' }
+$instrPath = if ($PromptFile) { $PromptFile } else { Join-Path $root 'system-prompt.md' }
 if (-not (Test-Path $instrPath)) { throw "prompt file not found: $instrPath" }
 $instr = [System.IO.File]::ReadAllText($instrPath)
 

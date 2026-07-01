@@ -18,7 +18,7 @@ without repeating yourself.
 
 - **One prompt, both tools, every turn** — Claude Code loads it each session; Copilot/Chat attaches it
   to every request via `applyTo: '**'`.
-- **Editable, not hard-coded** — the prompt lives in `instructions.md`. Edit it, re-run the installer,
+- **Editable, not hard-coded** — the prompt lives in `system-prompt.md`. Edit it, re-run the installer,
   done. You never touch installer code to change what the agents are told.
 - **Optional theme** with a **selectable accent color**.
 - **Cross-platform** — Windows (PowerShell) and macOS/Linux (bash).
@@ -90,7 +90,7 @@ handled too. Any file it would overwrite is backed up to `*.bak-<timestamp>` fir
 
 ## Customize the prompt
 
-Open **`instructions.md`** and make it yours — your voice, your rules, your do's and don'ts. Then
+Open **`system-prompt.md`** and make it yours — your voice, your rules, your do's and don'ts. Then
 re-run the installer to push the change to Claude Code and Copilot/Chat everywhere. That's the whole
 workflow; the prompt is data, not code.
 
@@ -144,7 +144,7 @@ entirely optional; omit the flag if you don't want it.
 
 ## Files
 
-- `instructions.md` — the system prompt (edit this).
+- `system-prompt.md` — the system prompt (edit this).
 - `bootstrap-prompt.md` — optional paste-in prompt to scaffold a project's agent system.
 - `install.ps1` / `install.sh` — the installers.
 - `make-theme.js` — generates the accent theme and merges it into `settings.json`.

@@ -14,5 +14,5 @@ If a user asks you to set it up on this machine:
 3. Do not overwrite existing config without backing it up first (the installer already does this).
 4. Tell the user to reload VS Code so the changes take effect.
 
-The prompt content is the editable file `instructions.md` — edit that to change what the agents are
+The prompt content is the editable file `system-prompt.md` — edit that to change what the agents are
 told; you never edit installer code to change prompt content.
