@@ -1,0 +1,17 @@
+# Backups the installer drops next to files it overwrites
+*.bak
+*.bak-*
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+node_modules/
+
+# Local project continuity, if you use the bootstrap prompt
+.agent/
+
+# Never commit secrets
+.env
+.env.*
+*.pem
+*.key
