@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # BOT-CODE-MODS installer (macOS / Linux).
-# Installs a persistent system prompt into Claude Code and VS Code Chat / Copilot, plus the auto-audit
-# agent skill. Optionally installs the caveman compression mode.
+# Installs a persistent system prompt into Claude Code and VS Code Chat / Copilot, plus every agent
+# skill under skills/. Optionally installs the caveman compression mode.
 #
 # Examples:
 #   bash install.sh
 #   bash install.sh --caveman
-#   bash install.sh --no-auto-audit
+#   bash install.sh --no-skills
+#   bash install.sh --only-skill auto-audit --only-skill auto-doc
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-CAVEMAN=0; AUTO_AUDIT=1; PROMPT_FILE="$ROOT/system-prompt.md"
+CAVEMAN=0; SKILLS=1; ONLY_SKILLS=""; PROMPT_FILE="$ROOT/system-prompt.md"
 while [ $# -gt 0 ]; do
   case "$1" in
     --caveman) CAVEMAN=1 ;;
-    --no-auto-audit) AUTO_AUDIT=0 ;;
+    --no-skills) SKILLS=0 ;;
+    --no-auto-audit) SKILLS=0 ;;   # deprecated alias, kept so older instructions keep working
+    --only-skill) shift; ONLY_SKILLS="$ONLY_SKILLS ${1:-}" ;;
     --prompt) shift; PROMPT_FILE="${1:-}" ;;
     *) echo "unknown option: $1" ;;
   esac
@@ -49,22 +52,27 @@ for u in "${FOUND[@]}"; do
   echo "[ok] VS Code Chat -> $target"
 done
 
-# 3. auto-audit agent skill (skip with --no-auto-audit)
-if [ "$AUTO_AUDIT" = 1 ]; then
-  SKILL_SRC="$ROOT/skills/auto-audit/SKILL.md"
-  if [ -f "$SKILL_SRC" ]; then
-    SKILL_DIRS=("$HOME/.claude/skills")
-    # ~/.agents/skills is the cross-runtime alias (Codex, Copilot CLI, Gemini CLI); mirror only if present
-    [ -d "$HOME/.agents/skills" ] && SKILL_DIRS+=("$HOME/.agents/skills")
+# 3. agent skills — every skills/*/SKILL.md (skip with --no-skills, narrow with --only-skill)
+if [ "$SKILLS" = 1 ]; then
+  SKILL_DIRS=("$HOME/.claude/skills")
+  # ~/.agents/skills is the cross-runtime alias (Codex, Copilot CLI, Gemini CLI); mirror only if present
+  if [ -d "$HOME/.agents/skills" ]; then SKILL_DIRS+=("$HOME/.agents/skills"); fi
+  found=0
+  for src in "$ROOT"/skills/*/SKILL.md; do
+    [ -f "$src" ] || continue
+    name="$(basename "$(dirname "$src")")"
+    if [ -n "$ONLY_SKILLS" ]; then
+      case " $ONLY_SKILLS " in *" $name "*) ;; *) continue ;; esac
+    fi
+    found=$((found+1))
     for d in "${SKILL_DIRS[@]}"; do
-      target="$d/auto-audit/SKILL.md"
+      target="$d/$name/SKILL.md"
       mkdir -p "$(dirname "$target")"; backup_if_exists "$target"
-      cp "$SKILL_SRC" "$target"
-      echo "[ok] auto-audit   -> $target"
+      cp "$src" "$target"
+      echo "[ok] skill        -> $target"
     done
-  else
-    echo "  [warn] skills/auto-audit/SKILL.md not found; auto-audit skipped."
-  fi
+  done
+  if [ "$found" -eq 0 ]; then echo "  [warn] no skills matched; nothing installed from skills/."; fi
 fi
 
 # 4. Optional caveman compression mode (third-party, public)

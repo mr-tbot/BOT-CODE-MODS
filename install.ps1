@@ -1,19 +1,23 @@
 #Requires -Version 5.1
 <#
   BOT-CODE-MODS installer (Windows).
-  Installs a persistent system prompt into Claude Code and VS Code Chat / Copilot, plus the auto-audit
-  agent skill. Optionally installs the caveman compression mode.
+  Installs a persistent system prompt into Claude Code and VS Code Chat / Copilot, plus every agent
+  skill under skills\. Optionally installs the caveman compression mode.
 
   Examples:
     powershell -ExecutionPolicy Bypass -File .\install.ps1
     powershell -ExecutionPolicy Bypass -File .\install.ps1 -Caveman
-    powershell -ExecutionPolicy Bypass -File .\install.ps1 -NoAutoAudit
+    powershell -ExecutionPolicy Bypass -File .\install.ps1 -NoSkills
+    powershell -ExecutionPolicy Bypass -File .\install.ps1 -OnlySkill auto-audit,auto-doc
 #>
 param(
     [switch]$Caveman,
-    [switch]$NoAutoAudit,
+    [switch]$NoSkills,
+    [Alias('NoAutoAudit')][switch]$NoSkillsAlias,   # deprecated alias, kept so older instructions keep working
+    [string[]]$OnlySkill,
     [string]$PromptFile
 )
+if ($NoSkillsAlias) { $NoSkills = $true }
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 
@@ -64,23 +68,28 @@ foreach ($u in $found) {
     Write-Host "[ok] VS Code Chat -> $target" -ForegroundColor Green
 }
 
-# --- 3. auto-audit agent skill (skip with -NoAutoAudit) ---
-if (-not $NoAutoAudit) {
-    $skillSrc = Join-Path $root 'skills\auto-audit\SKILL.md'
-    if (Test-Path $skillSrc) {
-        $skillRoots = @((Join-Path $env:USERPROFILE '.claude\skills'))
-        # ~/.agents/skills is the cross-runtime alias (Codex, Copilot CLI, Gemini CLI); mirror only if present
-        $agentsRoot = Join-Path $env:USERPROFILE '.agents\skills'
-        if (Test-Path $agentsRoot) { $skillRoots += $agentsRoot }
+# --- 3. agent skills — every skills\*\SKILL.md (skip with -NoSkills, narrow with -OnlySkill) ---
+if (-not $NoSkills) {
+    $skillRoots = @((Join-Path $env:USERPROFILE '.claude\skills'))
+    # ~/.agents/skills is the cross-runtime alias (Codex, Copilot CLI, Gemini CLI); mirror only if present
+    $agentsRoot = Join-Path $env:USERPROFILE '.agents\skills'
+    if (Test-Path $agentsRoot) { $skillRoots += $agentsRoot }
+
+    $found = 0
+    Get-ChildItem -Path (Join-Path $root 'skills') -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $name = $_.Name
+        $skillSrc = Join-Path $_.FullName 'SKILL.md'
+        if (-not (Test-Path $skillSrc)) { return }
+        if ($OnlySkill -and ($OnlySkill -notcontains $name)) { return }
+        $found++
         foreach ($r in $skillRoots) {
-            $target = Join-Path $r 'auto-audit\SKILL.md'
+            $target = Join-Path $r "$name\SKILL.md"
             Backup-IfExists $target
             Write-Utf8NoBom $target ([System.IO.File]::ReadAllText($skillSrc))
-            Write-Host "[ok] auto-audit   -> $target" -ForegroundColor Green
+            Write-Host "[ok] skill        -> $target" -ForegroundColor Green
         }
-    } else {
-        Write-Host "  [warn] skills\auto-audit\SKILL.md not found; auto-audit skipped." -ForegroundColor Yellow
     }
+    if ($found -eq 0) { Write-Host "  [warn] no skills matched; nothing installed from skills\." -ForegroundColor Yellow }
 }
 
 # --- 4. Optional caveman compression mode (third-party, public) ---

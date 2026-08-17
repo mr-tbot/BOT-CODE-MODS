@@ -2,8 +2,8 @@
 
 **Give your AI coding tools one consistent brain.** BOT-CODE-MODS installs a persistent *system
 prompt* into both **Claude Code** and **VS Code Chat / GitHub Copilot** so every chat turn, in every
-project, follows the same rules you set. It also installs the **auto-audit** agent skill, and ships an
-**optional token-compression mode**.
+project, follows the same rules you set. It also installs the **Auto-\* agent skills** — a family of
+finish-the-job audits — and ships an **optional token-compression mode**.
 
 It's a handful of small scripts and editable Markdown — no framework, no telemetry, no account.
 
@@ -61,8 +61,9 @@ active, open chat and ask: *"what standing instructions are you following?"*
 
 | Goal | PowerShell | bash |
 |------|------------|------|
-| Prompt + auto-audit skill (default) | `install.ps1` | `install.sh` |
-| Skip the auto-audit skill | add `-NoAutoAudit` | add `--no-auto-audit` |
+| Prompt + all skills (default) | `install.ps1` | `install.sh` |
+| Skip the skills | add `-NoSkills` | add `--no-skills` |
+| Install only certain skills | `-OnlySkill auto-audit,auto-doc` | `--only-skill auto-audit --only-skill auto-doc` |
 | Also install caveman compression | add `-Caveman` | add `--caveman` |
 | Use a different prompt file | `-PromptFile .\my-prompt.md` | `--prompt ./my-prompt.md` |
 
@@ -74,7 +75,7 @@ active, open chat and ask: *"what standing instructions are you following?"*
 |--------|------|-------|
 | Claude Code | `~/.claude/CLAUDE.md` | loaded at the start of every Claude Code session |
 | VS Code Chat / Copilot | `<VS Code User>/prompts/bot-code-mods.instructions.md` | `applyTo: '**'` attaches it to every chat request |
-| auto-audit skill | `~/.claude/skills/auto-audit/SKILL.md` | also mirrored to `~/.agents/skills/` if that directory already exists |
+| Agent skills | `~/.claude/skills/<skill>/SKILL.md`, one per directory under `skills/` | also mirrored to `~/.agents/skills/` if that directory already exists |
 
 `<VS Code User>` is `%APPDATA%\Code\User` (Windows), `~/Library/Application Support/Code/User`
 (macOS), or `~/.config/Code/User` (Linux). VS Code **Insiders** and **VSCodium** are detected and
@@ -98,26 +99,25 @@ It's optional and self-contained — paste it into your AI chat from inside a pr
 
 ---
 
-## The auto-audit skill
+## The Auto-* skills
 
-`skills/auto-audit/SKILL.md` is an agent skill that refuses to let a project be called finished before
-it actually is. It drives an iterative **audit → fix → build → verify → adversarially review → audit
-again** loop across every platform the project ships to — the machine the agent is running on
-included — and keeps looping until a complete pass turns up nothing.
+Everything under `skills/` is installed as an agent skill you can invoke by name (`/auto-audit`) or
+let trigger itself when it applies. They share one idea: an agent should not be allowed to call
+something finished before it demonstrably is.
 
-It exists because agents are good at producing code that compiles, launches, renders a UI, and moves
-zero bytes: a callback wired nowhere, an interface method that silently returns nothing, a counter
-incremented on the wrong side of the failure. The skill defines "finished" as *the runtime path
-demonstrably works on each target, with the log line to prove it* — not "it builds".
+| Skill | What it refuses to let you ship |
+|---|---|
+| **auto-audit** | A feature that compiles but moves zero bytes. Iterative audit → fix → build → verify → adversarially review, across every platform the project targets — the machine the agent runs on included — until a pass finds nothing |
+| **auto-rewrite** | Code that came from somewhere else. Internal duplication sweep, provenance search against the archives that actually hold the world's source, git forensics — then a remediation ladder where a rewrite is the fifth option, not the first |
+| **auto-license-check** | A dependency whose license you never read. Asks how you are actually releasing before it scans, opens the shipped artifact rather than trusting metadata, and treats an unknown license as a blocker |
+| **auto-ui-ux** | An interface built in phases that never got unified. Drift inventory, WCAG 2.2 AA with exact thresholds in every theme, the full state matrix per screen — with an interactive mode that asks and an AUTO mode that derives the answer from your codebase |
 
-Invoke it in chat with `/auto-audit`, or let it trigger itself when the agent is about to declare a
-feature done, a capability impossible, a platform unsupported, or a build ready to ship. Shipping
-stays your call: after a clean pass it reports ready and lists the project media the work invalidated,
-but never pushes or submits on its own.
+Each skill defines "finished" as *demonstrably works, with the evidence to prove it*, and none of them
+ship, push, or submit anything on your behalf — that stays your call.
 
-Skip it with `-NoAutoAudit` / `--no-auto-audit`. Upstream lives at
-[mr-tbot/Auto-Audit](https://github.com/mr-tbot/Auto-Audit); the copy here is vendored so this kit
-installs standalone.
+Skip them with `-NoSkills` / `--no-skills`, or install a subset with `-OnlySkill` / `--only-skill`.
+Each has an upstream repo under [github.com/mr-tbot](https://github.com/mr-tbot); the copies here are
+vendored so this kit installs standalone.
 
 ---
 
@@ -133,7 +133,7 @@ entirely optional; omit the flag if you don't want it.
 
 - **Prompt:** delete `~/.claude/CLAUDE.md` and `<VS Code User>/prompts/bot-code-mods.instructions.md`
   (or restore their `*.bak-*` backups).
-- **auto-audit:** delete `~/.claude/skills/auto-audit/` (and `~/.agents/skills/auto-audit/` if present).
+- **Skills:** delete the `auto-*` directories from `~/.claude/skills/` (and `~/.agents/skills/` if present).
 - **Caveman:** `npx -y github:JuliusBrussee/caveman -- --uninstall`.
 
 ---
@@ -142,7 +142,7 @@ entirely optional; omit the flag if you don't want it.
 
 - `system-prompt.md` — the system prompt (edit this).
 - `bootstrap-prompt.md` — optional paste-in prompt to scaffold a project's agent system.
-- `skills/auto-audit/SKILL.md` — the auto-audit agent skill.
+- `skills/<name>/SKILL.md` — the agent skills; every directory here gets installed.
 - `install.ps1` / `install.sh` — the installers.
 - `AGENTS.md` — a pointer so an AI agent opening this folder knows how to install it.
 - `LICENSE` — MIT.
