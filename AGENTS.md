@@ -19,4 +19,5 @@ If a user asks you to set it up on this machine:
 The prompt content is the editable file `system-prompt.md` — edit that to change what the agents are
 told; you never edit installer code to change prompt content. Likewise, skill content lives in
 `skills/<name>/SKILL.md`; the installer copies every directory it finds there, so adding a skill
-means adding a folder, not editing installer code.
+means adding a folder, not editing installer code. Upstream for the skills is
+https://github.com/mr-tbot/Auto-Everything.

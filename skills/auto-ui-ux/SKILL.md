@@ -1,6 +1,6 @@
 ---
 name: auto-ui-ux
-description: "Use when a project's UI needs to be brought to a professional finished state — when it was built in phases by different people or models and now has competing design idioms, when screens are inconsistent or half-finished, when the user asks to audit/polish/unify/fix the UI or UX, mentions design cohesion, accessibility, contrast, spacing, dark mode, or says \"/auto-ui-ux\"; or when about to declare a UI done without looking at it."
+description: "Use when a project's UI needs to be brought to a professional finished state — when it was built in phases by different people or models and now has competing design idioms, when screens are inconsistent or half-finished, when the user asks to audit/polish/unify/fix the UI or UX, mentions design cohesion, accessibility, contrast, spacing, dark mode, buttons or controls that do nothing, or says \"/auto-ui-ux\"; or when about to declare a UI done without looking at it."
 ---
 
 # /auto-ui-ux
@@ -150,7 +150,54 @@ criteria*, or ~57% of issue *instances* on real pages by Deque's measurement —
 different denominators and neither means "mostly covered". Keyboard order, focus management, labeling
 sense, and whether the flow is usable are manual.
 
-## Pass 4 — Completeness
+## Pass 4 — Wiring: Does The Control Actually Do Anything?
+
+A UI audit that only judges appearance will pass a screen full of buttons that do nothing. Every
+interactive element gets traced from the control to the effect.
+
+For each control, name the handler, then name what the handler actually reaches — a state change, a
+network call, a file write, a rendered frame. **A control whose trace ends in nothing is broken**, no
+matter how good it looks. The recurring shapes:
+
+- An `onClick` / `onPress` bound to an empty lambda, a `TODO()`, a no-op, or a handler that only logs
+- A handler wired to the wrong target — the copy of the function that is no longer called, an older
+  duplicate component, a stale route
+- A control bound to state nothing reads, or reading state nothing writes (the config-parity diff in
+  the previous pass finds the settings version of this)
+- A form that validates and never submits; a submit that posts to a dead endpoint
+- A feature flag defaulting off, so the control renders and is inert
+- A navigation target that no longer exists, or a deep link no route claims
+- A callback parameter left null, defaulted, or dropped through a refactor
+- A control disabled by a condition that can never become true
+
+Find them by tracing, not by looking:
+
+```bash
+# handlers that are empty, TODO, or log-only
+rg -n -B2 'on(Click|Press|Tap|Change|Submit)\s*=\s*\{\s*\}' 
+rg -n 'on(Click|Press|Tap)\s*=\s*\{[^}]*\b(TODO|FIXME|Log\.|console\.log|print)\b[^}]*\}'
+# declared-but-never-referenced handlers and routes
+rg -n 'fun handle[A-Z]\w*|const handle[A-Z]\w*' -o | sort -u   # then grep each name for a call site
+```
+
+Then **drive it**. Static tracing finds the obvious cases; the subtle ones only appear when you click
+the control and read the logs. Anything that survives Pass 6's capture step gets exercised, not just
+photographed.
+
+**When a break is found:**
+
+1. Report it as a wiring defect, separate from cosmetic findings — it is a different severity and a
+   different fix.
+2. Offer to correct it, with the specific fix named: which handler, which target, what it should
+   reach.
+3. **Then run `/auto-audit` before continuing the loop.** A disconnected control is rarely alone —
+   it means a wiring pass was skipped somewhere, and auto-audit is the skill that traces runtime paths
+   end to end across the whole project rather than screen by screen. Fold its findings back in and
+   re-enter this loop at Pass 1.
+
+A UI pass that fixes the paint on a dead button has made the product worse: it now looks finished.
+
+## Pass 5 — Completeness
 
 Per screen, the state matrix. A screen missing these is unfinished no matter how it looks:
 
@@ -172,10 +219,11 @@ Then per flow:
 - **Every interactive element** has hover, pressed, focus, and disabled states — or a documented reason
   it does not
 
-And per TBOT's standing rule: **every config option gets a UI surface** in the existing settings
-pattern, and file-based config stays in sync with it, unless the user says an option is file-only.
+**Config parity:** every config option gets a UI surface in the existing settings pattern, and
+file-based config stays in sync with it — unless the user says an option is deliberately file-only.
+An option that exists in a config file and nowhere in the UI is an unfinished feature.
 
-## Pass 5 — Apply, In Reviewable Batches
+## Pass 6 — Apply, In Reviewable Batches
 
 Never one giant diff. Batch by screen or by token — whichever produces a diff a human can actually
 approve — and checkpoint between batches. Back up before editing per the project's convention, and
@@ -185,7 +233,7 @@ Token migrations go through codemods where the codebase supports it, staged per 
 per batch. A find-and-replace across a design system is how you discover that three of those greys
 were load-bearing.
 
-## Pass 6 — Look At It
+## Pass 7 — Look At It
 
 A UI change is not done because the code changed. Capture and **actually view** the result, for every
 theme and breakpoint you touched:
@@ -226,13 +274,17 @@ Never restyle something that already works to match a preference nobody expresse
 
 ## Iterate Until Finished
 
-Loop: inventory → target → correctness → completeness → apply → look → inventory again. Stop when a
-full pass finds nothing. One pass never does — the second pass always finds screens the first one
-changed inconsistently.
+Loop: inventory → target → correctness → **wiring** → completeness → apply → look → inventory again.
+Stop when a full pass finds nothing. One pass never does — the second pass always finds screens the
+first one changed inconsistently.
+
+**If any pass found a wiring break, the loop is not done until `/auto-audit` has run and its findings
+are folded back in.** A dead control is evidence that something upstream was never connected.
 
 **Finished** means: one visual language across every screen; the state matrix filled on every screen;
 AA thresholds met in every theme; platform target minimums met; every interactive element has its full
-state set; and you have *looked at* every screen you touched, in every theme and breakpoint.
+state set **and demonstrably does something**; and you have *looked at* every screen you touched, in
+every theme and breakpoint.
 
 ## Rationalization Table
 
@@ -249,6 +301,9 @@ state set; and you have *looked at* every screen you touched, in every theme and
 | "AUTO mode means I don't explain" | AUTO means no questions, not no reasoning. Report every judgment |
 | "Disabled the button until the form is valid" | Anti-pattern — unfocusable, unreadable, and it hides the error |
 | "It's a 1px border, snap it to the scale" | Hairlines are not spacing. Some values are intentional |
+| "The button renders correctly" | Rendering is not wiring. Trace the handler to a real effect |
+| "The handler exists, so it works" | It may target the copy nobody calls. Follow it to the end |
+| "I'll note the dead control and move on" | A dead control means a wiring pass was skipped. Fix it, then run /auto-audit |
 
 ## Red Flags — Keep Working
 
@@ -259,4 +314,6 @@ state set; and you have *looked at* every screen you touched, in every theme and
 - Consolidating tokens without perceptual-distance math behind the clusters
 - Reporting "polished" while screens still lack empty, error, or offline states
 - Deriving a target system in AUTO mode without stating why each choice won
+- Polishing a control without tracing what it actually does
+- Finding a wiring break and continuing the loop without running /auto-audit
 - Ending after one pass

@@ -105,18 +105,22 @@ Everything under `skills/` is installed as an agent skill you can invoke by name
 let trigger itself when it applies. They share one idea: an agent should not be allowed to call
 something finished before it demonstrably is.
 
-| Skill | What it refuses to let you ship |
+| Skill | Refuses to let you ship |
 |---|---|
 | **auto-audit** | A feature that compiles but moves zero bytes. Iterative audit → fix → build → verify → adversarially review, across every platform the project targets — the machine the agent runs on included — until a pass finds nothing |
-| **auto-rewrite** | Code that came from somewhere else. Internal duplication sweep, provenance search against the archives that actually hold the world's source, git forensics — then a remediation ladder where a rewrite is the fifth option, not the first |
-| **auto-license-check** | A dependency whose license you never read. Asks how you are actually releasing before it scans, opens the shipped artifact rather than trusting metadata, and treats an unknown license as a blocker |
-| **auto-ui-ux** | An interface built in phases that never got unified. Drift inventory, WCAG 2.2 AA with exact thresholds in every theme, the full state matrix per screen — with an interactive mode that asks and an AUTO mode that derives the answer from your codebase |
+| **auto-rewrite** | Code that came from somewhere else. Duplication sweep, provenance search against the archives that actually hold the world's source, git forensics — then a remediation ladder where rewriting is the fifth option |
+| **auto-license-check** | A dependency whose license nobody read. Asks how you actually release before it scans, opens the shipped artifact rather than trusting metadata, and treats an unknown license as a blocker |
+| **auto-ui-ux** | An interface built in phases that never got unified — and controls that render beautifully while doing nothing. Drift, WCAG 2.2 AA in every theme, the state matrix, and a wiring pass that traces every control to a real effect |
+| **auto-doc** | Documentation, changelogs, wikis and feature claims the code has outrun — including in-product copy and the locales still promising a removed feature |
+
+More are on the way in the upstream repo: auto-web, auto-brand-parity, auto-media-maker,
+auto-balance, auto-issue-fix, and auto-everything (the whole family as one pass).
 
 Each skill defines "finished" as *demonstrably works, with the evidence to prove it*, and none of them
-ship, push, or submit anything on your behalf — that stays your call.
+ship, push, submit or post on your behalf — that stays your call.
 
 Skip them with `-NoSkills` / `--no-skills`, or install a subset with `-OnlySkill` / `--only-skill`.
-Each has an upstream repo under [github.com/mr-tbot](https://github.com/mr-tbot); the copies here are
+Upstream is [mr-tbot/Auto-Everything](https://github.com/mr-tbot/Auto-Everything); the copies here are
 vendored so this kit installs standalone.
 
 ---
