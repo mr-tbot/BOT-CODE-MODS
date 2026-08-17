@@ -1,15 +1,17 @@
 #Requires -Version 5.1
 <#
   BOT-CODE-MODS installer (Windows).
-  Installs a persistent system prompt into Claude Code and VS Code Chat / Copilot. Optionally installs
-  the caveman compression mode.
+  Installs a persistent system prompt into Claude Code and VS Code Chat / Copilot, plus the auto-audit
+  agent skill. Optionally installs the caveman compression mode.
 
   Examples:
     powershell -ExecutionPolicy Bypass -File .\install.ps1
     powershell -ExecutionPolicy Bypass -File .\install.ps1 -Caveman
+    powershell -ExecutionPolicy Bypass -File .\install.ps1 -NoAutoAudit
 #>
 param(
     [switch]$Caveman,
+    [switch]$NoAutoAudit,
     [string]$PromptFile
 )
 $ErrorActionPreference = 'Stop'
@@ -62,7 +64,26 @@ foreach ($u in $found) {
     Write-Host "[ok] VS Code Chat -> $target" -ForegroundColor Green
 }
 
-# --- 3. Optional caveman compression mode (third-party, public) ---
+# --- 3. auto-audit agent skill (skip with -NoAutoAudit) ---
+if (-not $NoAutoAudit) {
+    $skillSrc = Join-Path $root 'skills\auto-audit\SKILL.md'
+    if (Test-Path $skillSrc) {
+        $skillRoots = @((Join-Path $env:USERPROFILE '.claude\skills'))
+        # ~/.agents/skills is the cross-runtime alias (Codex, Copilot CLI, Gemini CLI); mirror only if present
+        $agentsRoot = Join-Path $env:USERPROFILE '.agents\skills'
+        if (Test-Path $agentsRoot) { $skillRoots += $agentsRoot }
+        foreach ($r in $skillRoots) {
+            $target = Join-Path $r 'auto-audit\SKILL.md'
+            Backup-IfExists $target
+            Write-Utf8NoBom $target ([System.IO.File]::ReadAllText($skillSrc))
+            Write-Host "[ok] auto-audit   -> $target" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "  [warn] skills\auto-audit\SKILL.md not found; auto-audit skipped." -ForegroundColor Yellow
+    }
+}
+
+# --- 4. Optional caveman compression mode (third-party, public) ---
 if ($Caveman) {
     if (Get-Command node -ErrorAction SilentlyContinue) {
         Write-Host "[*] Installing caveman (github.com/JuliusBrussee/caveman)..." -ForegroundColor Cyan
