@@ -67,6 +67,12 @@ if [ "$SKILLS" = 1 ]; then
     found=$((found+1))
     for d in "${SKILL_DIRS[@]}"; do
       target="$d/$name/SKILL.md"
+      # A symlinked skill dir/file means the user develops that skill from its own repo.
+      # cp would follow the link and overwrite their source, so leave it alone.
+      if [ -L "$d/$name" ] || [ -L "$target" ]; then
+        echo "[skip] $name — $d/$name is a symlink (live-linked to its source repo)"
+        continue
+      fi
       mkdir -p "$(dirname "$target")"; backup_if_exists "$target"
       cp "$src" "$target"
       echo "[ok] skill        -> $target"

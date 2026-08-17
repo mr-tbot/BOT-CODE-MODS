@@ -83,7 +83,16 @@ if (-not $NoSkills) {
         if ($OnlySkill -and ($OnlySkill -notcontains $name)) { return }
         $found++
         foreach ($r in $skillRoots) {
-            $target = Join-Path $r "$name\SKILL.md"
+            $skillDir = Join-Path $r $name
+            $target = Join-Path $skillDir 'SKILL.md'
+            # A symlinked skill dir/file means the user develops that skill from its own repo;
+            # writing through the link would overwrite their source. Leave it alone.
+            $linked = @($skillDir, $target) | Where-Object { Test-Path $_ } |
+                      ForEach-Object { (Get-Item $_ -Force).LinkType } | Where-Object { $_ }
+            if ($linked) {
+                Write-Host "[skip] $name — $skillDir is a link (live-linked to its source repo)" -ForegroundColor DarkYellow
+                continue
+            }
             Backup-IfExists $target
             Write-Utf8NoBom $target ([System.IO.File]::ReadAllText($skillSrc))
             Write-Host "[ok] skill        -> $target" -ForegroundColor Green
