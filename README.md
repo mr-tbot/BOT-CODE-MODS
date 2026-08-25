@@ -113,6 +113,8 @@ something finished before it demonstrably is.
 | **auto-ui-ux** | An interface built in phases that never got unified — and controls that render beautifully while doing nothing. Drift, WCAG 2.2 AA in every theme, the state matrix, and a wiring pass that traces every control to a real effect |
 | **auto-doc** | Documentation, changelogs, wikis and feature claims the code has outrun — including in-product copy and the locales still promising a removed feature |
 | **auto-skill-update** | Skills and plugins quietly running a version behind the repo they came from. Most are bare directories with no version and no remote, so it establishes provenance first — manifests, on-disk source repos, then content fingerprint search for the ones that aren't obvious — and never calls a skill it could not identify up to date |
+| **auto-agent-eco** | Subagent fan-out that defaults every worker to the heaviest model. Caps subagents strictly below the orchestrator's tier so the expensive model routes and merges — and refuses to economise on adversarial verification, where a cheap "verified" is the failure mode |
+| **auto-agent-max** | The opposite ceiling, for when the answer matters more than the bill: peer-tier subagents allowed, but a grep is still a grep. Treats peer agreement as correlation rather than verification |
 
 Also vendored here, same as upstream: auto-web, auto-brand-parity, auto-media-maker,
 auto-balance, auto-issue-fix, auto-audit-security, auto-comment, and auto-everything

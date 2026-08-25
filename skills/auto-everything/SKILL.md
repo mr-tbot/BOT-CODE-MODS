@@ -21,6 +21,19 @@ mid-build that three other sessions are compiling is the wrong time.
 If balance says the machine is saturated, the correct move is to wait or reduce scope — say so rather
 than pressing on.
 
+Balance decides **how many** agents. It does not decide **which tier** they run at, and on a long pass
+that choice moves the bill more than anything else. If the user has named a policy, follow it:
+**`/auto-agent-eco`** keeps subagents strictly below the orchestrator's tier, so the expensive model
+routes and merges while cheaper ones do the legwork; **`/auto-agent-max`** lifts that ceiling for work
+where a peer-tier subagent genuinely earns its cost. Either accepts a number as a hard cap on how many
+subagents may run — `/auto-agent-eco 6`.
+
+Neither policy can raise balance's number. A cheaper agent still occupies a slot on the machine and
+still counts against account limits, and a peer-tier one is heavier per agent rather than lighter —
+so max mode reaches the ceiling sooner, not later. **Resource limits win over cost policy in both
+directions.** With no policy named, route by task, keep the synthesis with the orchestrator, and say
+in the final report which tiers ran where.
+
 ## Step 1 — Intake: What Are We Actually Fixing?
 
 Run **`/auto-issue-fix`** in **read-only intake mode** first. Pull the reported problems from every
