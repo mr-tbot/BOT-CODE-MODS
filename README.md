@@ -112,9 +112,11 @@ something finished before it demonstrably is.
 | **auto-license-check** | A dependency whose license nobody read. Asks how you actually release before it scans, opens the shipped artifact rather than trusting metadata, and treats an unknown license as a blocker |
 | **auto-ui-ux** | An interface built in phases that never got unified — and controls that render beautifully while doing nothing. Drift, WCAG 2.2 AA in every theme, the state matrix, and a wiring pass that traces every control to a real effect |
 | **auto-doc** | Documentation, changelogs, wikis and feature claims the code has outrun — including in-product copy and the locales still promising a removed feature |
+| **auto-skill-update** | Skills and plugins quietly running a version behind the repo they came from. Most are bare directories with no version and no remote, so it establishes provenance first — manifests, on-disk source repos, then content fingerprint search for the ones that aren't obvious — and never calls a skill it could not identify up to date |
 
-More are on the way in the upstream repo: auto-web, auto-brand-parity, auto-media-maker,
-auto-balance, auto-issue-fix, and auto-everything (the whole family as one pass).
+Also vendored here, same as upstream: auto-web, auto-brand-parity, auto-media-maker,
+auto-balance, auto-issue-fix, auto-audit-security, auto-comment, and auto-everything
+(the whole family as one pass, in dependency order).
 
 Each skill defines "finished" as *demonstrably works, with the evidence to prove it*, and none of them
 ship, push, submit or post on your behalf — that stays your call.
