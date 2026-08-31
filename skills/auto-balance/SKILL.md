@@ -1,9 +1,9 @@
 ---
 name: auto-balance
-description: "Use at the start of a session on a machine running several editors, agents or builds at once — when builds fight for CPU/RAM, an OOM kill lands, devices are contested (Android phones, ESP32 or dev boards on serial, iOS devices on a remote Mac), or the user mentions resource limits, parallel sessions, subagent count, account limits, or says \"/auto-balance\"; or before starting a long build or flashing a board."
+description: "Use at the start of a session on a machine running several editors, agents or builds at once — when builds fight for CPU/RAM, an OOM kill lands, devices are contested (Android phones, ESP32 or dev boards on serial, iOS devices on a remote Mac), or the user mentions resource limits, parallel sessions, subagent count, account limits, or says \"/auto-balance\"; or before starting a long build or flashing a board. Resource admission itself is handled by `aw` (agent-awareness); this skill covers what `aw` cannot measure — silently-discarded controls, device and remote-host cost, and account limits."
 ---
 
-# /auto-balance
+# /auto-balance — machine truth and account budget for parallel agents
 
 Make this session a good citizen on a machine that is running several others. Cap what it consumes,
 take turns on hardware, and size its own agent count so the account never hits a limit.
@@ -74,49 +74,29 @@ barely bites (bfq is what honours it, and it is often an unloaded module). **Nev
 Same forbidden class: `/proc/sys/vm/*`, cpufreq governors, and `renice -u <user>` (which hits that
 user's editor too).
 
-## Step 3 — Decide Whether To Start At All
-
-Use PSI, not load average — it catches contention that load average shows as zero:
+## Step 3 — Decide Whether To Start, And Take Turns
 
 ```bash
-cat /proc/pressure/{cpu,io,memory}     # some avg10 is the "right now" number
-grep MemAvailable /proc/meminfo
+aw run --class build -- <cmd>          # queues, gates, caps, and learns the cost
+aw board                               # who is doing what, and is there room
+aw doctor                              # what is killing this machine
 ```
 
-**A snapshot gate is TOCTOU by construction** — two sessions sampling an idle box in the same second
-both start. The gate must be held under a lock (Step 4).
+**`agent-awareness` owns admission.** It reads the machine inside the same lock that records the
+decision — a snapshot gate is TOCTOU by construction, and five sessions sampling an idle box in the
+same second all start. It reserves rather than measures, because a build admitted now allocates over
+the next minute. And it runs the job in its own `systemd-run --user --scope` under `app.slice`, which
+is what makes an overrun kill the job instead of the editor: under snap every VS Code window shares
+one cgroup, and that cgroup is a leaf, which is exactly what systemd-oomd prefers to kill.
 
-For event-driven backoff, register a PSI trigger — with two constraints that break naive code:
+If it is not installed: `git clone https://github.com/mr-tbot/agent-awareness && cd agent-awareness &&
+./install.sh`.
 
-- **The trigger string must end in `\n`.** Without it you get `EINVAL`: the kernel copies
-  `min(nbytes,32)` and NUL-terminates by clobbering the last byte, eating the final digit of your
-  window.
-- **Unprivileged windows must be multiples of 2s**, and triggers only work on a cgroup **you own** —
-  writing to `user@$UID.service/memory.pressure` is `EACCES` (root-owned). Create your own cgroup or
-  use a transient scope.
+Do not hand-roll the lock. The flock recipe that used to live here is implemented, with the fd
+inheritance and inode traps handled, inside `aw`.
 
-## Step 4 — Take Turns
 
-`flock` is the correct primitive because **the kernel releases it when the fd closes** — clean exit,
-segfault, or SIGKILL alike. No stale-lock problem by construction.
-
-```bash
-flock -x -w 1800 /run/user/$UID/agent-build.lock -c 'make -j6'
-# payload that spawns children: flock -o (close fd before exec) or the in-script form:
-exec 9>/run/user/$UID/agent-build.lock; flock -n 9 || exit 1
-```
-
-**Never build a PID-file lock.** Every throttling tool takes a raw PID, which invites one, and PID
-reuse means you throttle a stranger's process. If you must track a PID, validate it with the start
-time in field 22 of `/proc/PID/stat` plus the boot id — and read `/proc/sys/kernel/pid_max`, because a
-32768 value is a fast-wrap environment. Parse that field by splitting after the **last** `") "`, never
-with `awk '{print $22}'`: field 2 is the comm in parentheses and may itself contain spaces and `)`, so
-the naive split returns `0` for such a process — and two different processes then compare equal.
-
-`systemd-run --user --scope --unit=NAME` **fails if that scope already exists** — free mutual
-exclusion. Pair with `--collect` so a failed unit does not block the next run by name.
-
-## Step 5 — Run The Build Politely
+## Step 4 — Run The Build Politely
 
 ```bash
 systemd-run --user --scope --collect --unit=agent-build-$$ \
@@ -151,7 +131,7 @@ Size the next run honestly from `memory.peak`, `pids.peak` and `memory.events` (
 counters say whether your limit actually throttled) rather than guessing. On finishing, hand memory
 back with `memory.reclaim` instead of leaving page cache for the next session to fight.
 
-## Step 6 — Arbitrate Devices
+## Step 5 — Arbitrate Devices
 
 **Device arbitration belongs to `/auto-device-lock`.** Invoke it rather than reimplementing a lease
 here: it owns the registry, the canonical device identity, the crash-proof liveness rule and the
@@ -189,21 +169,23 @@ Ask the registry, or use `fuser` / `lsof`, which read occupancy without opening.
 **On Linux, ModemManager will grab a serial device** and can corrupt a flash. Suppress it per-device
 with a udev rule rather than disabling it globally — a global change affects every user of the box.
 
-## Step 7 — Size This Session's Agents
+## Step 6 — Size This Session's Agents
 
-Set concurrency from the account and the machine, whichever is tighter:
+`aw board` gives the live session count — divide memory by that, not by cores. Four sessions on a
+16-core box is four effective cores each, and the memory division matters more than the CPU one.
 
-- Divide by **actual concurrent sessions**, not by cores alone. Four sessions on a 16-core box is 4
-  effective cores each, and the memory division matters more than the CPU one.
+The rest is the account, not the machine:
+
 - Respect the plan. Ask the user their plan and typical session count; treat published limits as
   changeable and **check rather than hardcode** — the observable symptom of hitting one is a refusal
   or a throttle, not a crash.
 - Fewer, longer-running agents beat many short ones for both limits and coherence.
 
-State the chosen number and the reason. If the machine is already at pressure, the correct answer is
-sometimes **one**, or to wait.
+State the chosen number and the reason. **If the board says WAIT, the correct agent count is one, or
+zero.**
 
-## Step 8 — Re-Balance On Every Later Run
+
+## Step 7 — Re-Balance On Every Later Run
 
 Read `.agent/balance.json`, then measure reality: how many editor windows and agent sessions are live
 now, what is building, what devices are claimed and by whom, and what the current pressure is. Adjust
@@ -220,6 +202,7 @@ caps and agent count, report what changed, and update the file if the environmen
 | "I'll switch the scheduler to bfq" | Global root mutation affecting every user. Never |
 | "Scoping protects the build from OOM" | It makes it the preferred victim. It protects your *terminal* |
 | "The box looks idle, I'll start" | Two sessions just made that same measurement. Take the lock |
+| "I checked MemAvailable, there's room" | So did they, in the same second. `aw run` holds the lock across the check |
 | "I'll track the build by PID" | A bare PID is reuse-prone; throttle by flock. A *validated* holder (pid + start time + boot id) is a different thing — that is what `/auto-device-lock` leases on |
 | "Another session needs the box, I'll kill mine" | Freeze it. `cgroup.freeze` loses no work |
 | "adb sees the device, it's mine" | Claim it through `/auto-device-lock`. Two sessions driving one device is how a flash corrupts |
@@ -234,5 +217,6 @@ caps and agent count, report what changed, and update the file if the environmen
 - Killing another session's build when freezing would have done
 - Driving a device without a lease from `/auto-device-lock`
 - Running `adb kill-server` on a shared machine
+- Starting a build, render or emulator outside `aw run` on a machine with more than one live session
 - Choosing an agent count without asking the plan or measuring concurrent sessions
 - Leaving a lease or a manual cgroup behind on exit

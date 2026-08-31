@@ -19,7 +19,9 @@ can take the work at all. Everything after it is expensive; finding out mid-buil
 sessions are compiling is the wrong time.
 
 If balance says the machine is saturated, the correct move is to wait or reduce scope — say so rather
-than pressing on.
+than pressing on. Every build, render and test in this pass then goes through `aw run` (see
+`/auto-balance` Step 3): a full pass is exactly the situation where several windows start heavy work
+at once, and on a shared-cgroup machine an overrun takes every session down, not just this one.
 
 Then run **`/auto-device-lock`** and claim whatever hardware this pass will touch — phones, boards,
 test devices — for the whole pass, up front. A full pass runs builds, screenshots, recordings and
