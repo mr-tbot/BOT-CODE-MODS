@@ -15,3 +15,5 @@ node_modules/
 .env.*
 *.pem
 *.key
+__pycache__/
+*.pyc

@@ -15,6 +15,16 @@ follows it, it does not match, and that becomes a support ticket or a refund.
 The hard part is not making video. It is that six weeks later the login screen moved, the tutorial
 still shows the old one, and nobody notices until a customer follows it.
 
+## The Family
+
+Three skills, one pipeline. **This skill owns the shared foundation** — the pipeline, the interview,
+the brand folder, the `never_say` list, the catalog, the `watch`/`on_change` tracking, blessing and
+versioning — **and every video except two.** `/auto-media-onboarding` owns the first-run onboarding
+video. `/auto-media-stinger` owns the main stinger commercial. They read the state this skill writes
+and never fork it. If either runs first in a project, it bootstraps only the part of Steps 1–2 it
+needs, writes it here, and reports the series as unplanned — so a later run of this skill finds the
+state and does not re-interview.
+
 ## Step 1 — Find Or Establish The Pipeline
 
 **Ask for the media pipeline repo on first run** — the repo holding credentials, project configs and
@@ -55,7 +65,10 @@ different presenters per video kind.
 - **Advertisement / stinger**: the one that is allowed to be striking. Rhythm, contrast, a real idea.
 
 Ask each set separately, then offer *"use the same look for both"* as an explicit option. Cover: pace,
-register, music presence, caption style, aspect ratio, and length target.
+register, music presence, caption style, aspect ratio, and length target. Ask both sets here, in one
+sitting — asking twice in two sessions is how you get two contradictory answers. The standards those
+answers are judged against live in the siblings: tutorial craft in `/auto-media-onboarding`,
+advertising craft in `/auto-media-stinger`.
 
 **Brand.** Ask for a media folder — logos, colors, fonts, footage, reference films, and
 **anti-references** ("nothing like this"), which are usually the more useful answer.
@@ -72,7 +85,13 @@ tutorials, stinger, social cutdowns, release notes. **Record the skips and why**
 product is free"), so nobody re-asks in four months.
 
 Work in priority order: **onboarding first, payment second, operator surfaces third, feature tutorials
-after, stinger last.** Onboarding and payment are the ones that cost money when they are wrong.
+after, the stinger last.** Onboarding and payment are the ones that cost money when they are wrong.
+
+**Two of those entries are not yours to make.** The onboarding video belongs to
+`/auto-media-onboarding` and the stinger belongs to `/auto-media-stinger`. Plan them here, record them
+in the catalog here, then hand each to its skill. You own the pipeline, the interview, the catalog and
+everything in the middle of that list; they own one deliverable each and are held to standards you are
+not.
 
 ## Step 4 — Cut For Small Future Lifts
 
@@ -109,7 +128,9 @@ Three standing constraints, each learned from a series that shipped wrong:
 so a slow zoom moves the picture in 1px jumps — that is what "the screens all shake" means.
 Supersampling before the zoom reduces it but is damage control, not permission. If a beat feels dead,
 fix it upstream: a window where something actually happens, then a shorter beat, then a cut to a
-different surface. Push is the last resort and never above **1.03–1.05**.
+different surface. Push is the last resort and never above **1.03–1.05**. That ceiling is a property of
+the filter, not a house style, and it binds every beat showing a real screen anywhere in the family. A
+title card or a generated plate in a stinger is not a UI beat — `/auto-media-stinger` draws that line.
 
 **Unhurried.** Target **0.85×–1.05×**. Slowing down is free; speeding up never is — sped-up UI is
 exactly what a viewer calls rushed, and the frame-rate conversion adds judder on top. **Never fix an
@@ -129,7 +150,9 @@ Rules that keep this from becoming slop:
 
 - **Set these up on the first pass only.** On later runs, do not add tools unless the user asks.
 - **Generated B-roll is seasoning, not substance.** A product video's job is showing the product. Where
-  a real screen recording exists, it beats generated footage every time.
+  a real screen recording exists, it beats generated footage every time. The stinger is the one
+  deliverable where seasoning carries weight, and `/auto-media-stinger` states how far. Because it is
+  also paid advertising, the commercial-terms check below is a blocking gate there, not a footnote.
 - **Check the commercial-use terms before anything ships**, especially for music: several services'
   cheaper tiers exclude paid advertising, and the grant differs by plan. Confirm per service, per plan.
 - **Verify the current model and pricing before using any of them** — this area moves monthly, so read
@@ -153,16 +176,20 @@ memory, and a run that does not update it has broken the tracking that justifies
 
 1. Run the pipeline's `check` — which videos, which beats, which files moved.
 2. Read the plan and work each flagged beat by its declared action.
-3. **A diff is not automatically a re-cut.** Refactors, renames and formatter sweeps move files without
+3. **If a flagged beat belongs to the onboarding video or the stinger, hand it to that skill** rather
+   than cutting it here — and note in the plan that you did. Two skills that can both rewrite the same
+   deliverable is the drift this tracking exists to prevent.
+4. **A diff is not automatically a re-cut.** Refactors, renames and formatter sweeps move files without
    moving anything visible. Look at the screen; if nothing a viewer can see changed, **re-bless with a
    note saying so** — that is a correct outcome, not a workaround. The fingerprint is a tripwire, not
    an oracle.
-4. Re-render only changed lines, re-shoot only changed windows.
-5. Watch, bless, bump the version, write the memory.
+5. Re-render only changed lines, re-shoot only changed windows.
+6. Watch, bless, bump the version, write the memory.
 
 Also handle the cases `check` cannot see: copy and legal language changes invalidate work that looks
 fine, and **screen copy is copy** — a retired claim visible in footage is exactly as much of a problem
-as one that is spoken.
+as one that is spoken. The stinger is the standing example: it goes stale on price, name and
+positioning, which no file fingerprint will ever flag.
 
 ## Cost
 
@@ -197,4 +224,5 @@ not shaped like that, question the shape before spending.**
 - Adding new generation tools on a maintenance run without being asked
 - Shipping generated music or footage without checking commercial terms for that plan
 - Finishing a run without updating the video task list
+- Cutting the onboarding video or the stinger here instead of handing it to its skill
 - Publishing anywhere without explicit approval

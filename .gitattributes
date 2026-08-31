@@ -1,0 +1,6 @@
+# Shipped helpers must stay LF: a CRLF clone makes the shebang unexecutable.
+* text=auto eol=lf
+devlock text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.ps1 text eol=crlf

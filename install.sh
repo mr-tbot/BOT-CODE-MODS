@@ -58,24 +58,32 @@ if [ "$SKILLS" = 1 ]; then
   # ~/.agents/skills is the cross-runtime alias (Codex, Copilot CLI, Gemini CLI); mirror only if present
   if [ -d "$HOME/.agents/skills" ]; then SKILL_DIRS+=("$HOME/.agents/skills"); fi
   found=0
-  for src in "$ROOT"/skills/*/SKILL.md; do
-    [ -f "$src" ] || continue
-    name="$(basename "$(dirname "$src")")"
+  for srcdir in "$ROOT"/skills/*/; do
+    [ -f "$srcdir/SKILL.md" ] || continue
+    name="$(basename "$srcdir")"
     if [ -n "$ONLY_SKILLS" ]; then
       case " $ONLY_SKILLS " in *" $name "*) ;; *) continue ;; esac
     fi
     found=$((found+1))
     for d in "${SKILL_DIRS[@]}"; do
-      target="$d/$name/SKILL.md"
       # A symlinked skill dir/file means the user develops that skill from its own repo.
       # cp would follow the link and overwrite their source, so leave it alone.
-      if [ -L "$d/$name" ] || [ -L "$target" ]; then
+      if [ -L "$d/$name" ] || [ -L "$d/$name/SKILL.md" ]; then
         echo "[skip] $name — $d/$name is a symlink (live-linked to its source repo)"
         continue
       fi
-      mkdir -p "$(dirname "$target")"; backup_if_exists "$target"
-      cp "$src" "$target"
-      echo "[ok] skill        -> $target"
+      # Copy the whole skill directory, not just SKILL.md: a skill may ship a helper
+      # script or reference files beside it, and cp -p keeps the executable bit.
+      copied=0
+      while IFS= read -r rel; do
+        target="$d/$name/$rel"
+        [ -f "$target" ] && cmp -s "$srcdir$rel" "$target" && continue
+        mkdir -p "$(dirname "$target")"; backup_if_exists "$target"
+        cp -p "$srcdir$rel" "$target"
+        copied=$((copied+1))
+      done < <(cd "$srcdir" && find . -type f ! -name '.*' | sed 's|^\./||')
+      if [ "$copied" -gt 0 ]; then echo "[ok] skill        -> $d/$name/ ($copied file(s))"
+      else echo "[ok] skill        -> $d/$name/ (already current)"; fi
     done
   done
   if [ "$found" -eq 0 ]; then echo "  [warn] no skills matched; nothing installed from skills/."; fi

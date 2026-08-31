@@ -78,24 +78,41 @@ if (-not $NoSkills) {
     $found = 0
     Get-ChildItem -Path (Join-Path $root 'skills') -Directory -ErrorAction SilentlyContinue | ForEach-Object {
         $name = $_.Name
-        $skillSrc = Join-Path $_.FullName 'SKILL.md'
-        if (-not (Test-Path $skillSrc)) { return }
+        $srcDir = $_.FullName
+        if (-not (Test-Path (Join-Path $srcDir 'SKILL.md'))) { return }
         if ($OnlySkill -and ($OnlySkill -notcontains $name)) { return }
         $found++
         foreach ($r in $skillRoots) {
             $skillDir = Join-Path $r $name
-            $target = Join-Path $skillDir 'SKILL.md'
             # A symlinked skill dir/file means the user develops that skill from its own repo;
             # writing through the link would overwrite their source. Leave it alone.
-            $linked = @($skillDir, $target) | Where-Object { Test-Path $_ } |
+            $linked = @($skillDir, (Join-Path $skillDir 'SKILL.md')) | Where-Object { Test-Path $_ } |
                       ForEach-Object { (Get-Item $_ -Force).LinkType } | Where-Object { $_ }
             if ($linked) {
                 Write-Host "[skip] $name — $skillDir is a link (live-linked to its source repo)" -ForegroundColor DarkYellow
                 continue
             }
-            Backup-IfExists $target
-            Write-Utf8NoBom $target ([System.IO.File]::ReadAllText($skillSrc))
-            Write-Host "[ok] skill        -> $target" -ForegroundColor Green
+            # Copy the whole skill directory, not just SKILL.md: a skill may ship a helper
+            # script or reference files beside it.
+            $changed = @()
+            foreach ($f in (Get-ChildItem -Path $srcDir -File -Recurse | Where-Object { $_.Name -notlike '.*' })) {
+                $rel = $f.FullName.Substring($srcDir.Length).TrimStart('\', '/')
+                $target = Join-Path $skillDir $rel
+                if ((Test-Path $target) -and
+                    ((Get-FileHash $target).Hash -eq (Get-FileHash $f.FullName).Hash)) { continue }
+                $changed += ,@($f.FullName, $target)
+            }
+            foreach ($pair in $changed) {
+                $dir = Split-Path $pair[1] -Parent
+                if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+                Backup-IfExists $pair[1]
+                Copy-Item -LiteralPath $pair[0] -Destination $pair[1] -Force
+            }
+            if ($changed.Count -gt 0) {
+                Write-Host "[ok] skill        -> $skillDir\ ($($changed.Count) file(s))" -ForegroundColor Green
+            } else {
+                Write-Host "[ok] skill        -> $skillDir\ (already current)" -ForegroundColor Green
+            }
         }
     }
     if ($found -eq 0) { Write-Host "  [warn] no skills matched; nothing installed from skills\." -ForegroundColor Yellow }

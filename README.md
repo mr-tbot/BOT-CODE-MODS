@@ -75,7 +75,7 @@ active, open chat and ask: *"what standing instructions are you following?"*
 |--------|------|-------|
 | Claude Code | `~/.claude/CLAUDE.md` | loaded at the start of every Claude Code session |
 | VS Code Chat / Copilot | `<VS Code User>/prompts/bot-code-mods.instructions.md` | `applyTo: '**'` attaches it to every chat request |
-| Agent skills | `~/.claude/skills/<skill>/SKILL.md`, one per directory under `skills/` | also mirrored to `~/.agents/skills/` if that directory already exists |
+| Agent skills | `~/.claude/skills/<skill>/`, one directory per skill under `skills/` | the whole directory is copied, so a skill's helper scripts come with it; also mirrored to `~/.agents/skills/` if that directory already exists |
 
 `<VS Code User>` is `%APPDATA%\Code\User` (Windows), `~/Library/Application Support/Code/User`
 (macOS), or `~/.config/Code/User` (Linux). VS Code **Insiders** and **VSCodium** are detected and
@@ -115,9 +115,11 @@ something finished before it demonstrably is.
 | **auto-skill-update** | Skills and plugins quietly running a version behind the repo they came from. Most are bare directories with no version and no remote, so it establishes provenance first — manifests, on-disk source repos, then content fingerprint search for the ones that aren't obvious — and never calls a skill it could not identify up to date |
 | **auto-agent-eco** | Subagent fan-out that defaults every worker to the heaviest model. Caps subagents strictly below the orchestrator's tier so the expensive model routes and merges — and refuses to economise on adversarial verification, where a cheap "verified" is the failure mode |
 | **auto-agent-max** | The opposite ceiling, for when the answer matters more than the bill: peer-tier subagents allowed, but a grep is still a grep. Treats peer agreement as correlation rather than verification |
+| **auto-device-lock** | Two VS Code windows driving one phone. A device lease every session on the machine can see — taken before the first `adb` call, proven live by the holder's own process rather than a heartbeat, fenced so a session that was declared dead cannot wake up and write to hardware it no longer owns, and sticky so a project's screenshots keep coming from the same device |
 
-Also vendored here, same as upstream: auto-web, auto-brand-parity, auto-media-maker,
-auto-balance, auto-issue-fix, auto-audit-security, auto-comment, and auto-everything
+Also vendored here, same as upstream: auto-web, auto-brand-parity, the three media skills
+(auto-media-maker, auto-media-onboarding, auto-media-stinger), auto-balance, auto-issue-fix,
+auto-audit-security, auto-comment, and auto-everything
 (the whole family as one pass, in dependency order).
 
 Each skill defines "finished" as *demonstrably works, with the evidence to prove it*, and none of them

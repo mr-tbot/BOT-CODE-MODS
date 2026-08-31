@@ -14,12 +14,18 @@ video. Running them in the wrong order means doing the same work twice and repor
 
 ## Step 0 — Balance First, Always
 
-Start with **`/auto-balance`**. It sizes this session's parallelism, claims any devices needed, and
-decides whether the machine can take the work at all. Everything after it is expensive; finding out
-mid-build that three other sessions are compiling is the wrong time.
+Start with **`/auto-balance`**. It sizes this session's parallelism and decides whether the machine
+can take the work at all. Everything after it is expensive; finding out mid-build that three other
+sessions are compiling is the wrong time.
 
 If balance says the machine is saturated, the correct move is to wait or reduce scope — say so rather
 than pressing on.
+
+Then run **`/auto-device-lock`** and claim whatever hardware this pass will touch — phones, boards,
+test devices — for the whole pass, up front. A full pass runs builds, screenshots, recordings and
+video capture against the same device over hours, and discovering at Step 5 that another window took
+the phone means re-shooting everything already captured. Claim once, verify before each batch, release
+at the end.
 
 Balance decides **how many** agents. It does not decide **which tier** they run at, and on a long pass
 that choice moves the bill more than anything else. If the user has named a policy, follow it:
@@ -84,6 +90,12 @@ target.
 - **`/auto-doc`** — README, changelog, docs site, wikis, feature claims, in-product copy, store
   listings.
 - **`/auto-media-maker`** — its `check` names exactly which videos and which beats the code outran.
+- **`/auto-media-onboarding`** — the first-run film, if the flow it teaches moved. It is the video
+  that generates support tickets when it is stale, so it outranks the rest of the series.
+- **`/auto-media-stinger`** — the launch commercial, last, and only if the claims it makes are no
+  longer true. It changes least and costs most to redo.
+
+Every screenshot and capture in this step needs a device lease held and verified — see Step 0.
 
 These parallelize well. Both are cheap to re-run if Step 3 reopens.
 
@@ -147,8 +159,8 @@ enormous diff across eleven concerns is unreviewable, and unreviewable work does
 indistinguishable from a pass that hung.
 
 **Budget honestly.** Before starting, estimate roughly what the full pass costs in time and credits and
-offer a scoped-down version — release-critical only, or a single platform. `/auto-media-maker` and
-`/auto-audit` are the expensive ones.
+offer a scoped-down version — release-critical only, or a single platform. `/auto-media-maker`,
+`/auto-media-stinger` and `/auto-audit` are the expensive ones.
 
 **Respect every sub-skill's gates.** Running under one command does not upgrade anyone's permissions.
 Anything the individual skill would have asked about, this one asks about too — store-review replies,
@@ -167,11 +179,14 @@ consent-laundering mechanism.
 | "Running under one command, so I don't need to ask" | Gates are per action, not per invocation |
 | "One pass is enough this time" | It never has been. Run the cycle until it comes back empty |
 | "The machine is busy but I'll start anyway" | Balance runs first for a reason |
+| "I'll claim the phone when I get to the media step" | Another window will have it by then, and the shots already taken will not match |
 | "I'll batch all the issue replies at the end" | That is the mass-comment pattern. Per-item approval still applies |
 
 ## Red Flags — Stop
 
 - Starting without `/auto-balance`
+- Capturing a screenshot, a recording or a device test without a verified lease from
+  `/auto-device-lock` — a pass that loses the device halfway reshoots everything
 - Documenting or filming code that `/auto-audit` still has open findings against
 - Running licensing or provenance after the implementation work
 - Writing to trackers before the fixes are real and verified

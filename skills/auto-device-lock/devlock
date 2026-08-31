@@ -1,0 +1,1303 @@
+#!/usr/bin/env python3
+"""devlock — cross-session physical-device leases for parallel agent sessions.
+
+One registry, one flock, no daemon. A lease is valid iff its holder process is
+still alive, proven by (boot_id, pid, starttime) rather than by a heartbeat, so a
+crashed session's lease is self-invalidating and there is no stale lock to clean.
+
+Every mutation happens under an exclusive flock on a stable-inode lock file; the
+registry itself is replaced by rename, which is why the flock target is a
+*separate* file (renaming over a flock'd inode silently destroys exclusion).
+
+Python 3.8+, stdlib only.
+"""
+from __future__ import annotations
+
+import argparse
+import errno
+import fcntl
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from contextlib import contextmanager
+from pathlib import Path
+
+VERSION = "1.0.0"
+SCHEMA = 1
+
+# One exit-code table for every subcommand, so `devlock check X && do-work` and
+# `case $? in` behave the same whichever command produced the code.
+RC_OK        = 0   # you hold it, at your epoch, and it is attached and healthy
+RC_HELD      = 1   # someone else holds it
+RC_FREE      = 2   # nobody holds it — including you
+RC_POLICY    = 4   # refused: never_automate
+RC_ABSENT    = 5   # leased but not attached, or no such device
+RC_FENCED    = 6   # your lease lapsed and was re-granted; your state is stale
+RC_UNHEALTHY = 7   # attached but not in a state that accepts commands
+
+# Shell-ish frames to skip when walking up to the process that *is* the session.
+_TRANSPARENT = {
+    "bash", "sh", "zsh", "dash", "fish", "ksh", "csh", "tcsh",
+    "flock", "timeout", "env", "nohup", "setsid", "script", "sudo", "doas",
+    "python3", "python", "devlock",
+}
+_WINDOWS = {"code", "code-insiders", "codium", "cursor", "windsurf", "electron"}
+
+
+# ---------------------------------------------------------------- environment
+
+def runtime_dir() -> Path:
+    """Per-user, per-boot lock home. Cleared on reboot on Linux, which is correct:
+    no lease can outlive the boot it was taken in."""
+    if os.environ.get("DEVLOCK_DIR"):
+        d = Path(os.environ["DEVLOCK_DIR"])
+    elif sys.platform == "darwin":
+        # /run/user does not exist on macOS; confstr(_CS_DARWIN_USER_TEMP_DIR) is
+        # the per-user, per-boot equivalent and is wiped on restart.
+        try:
+            base = Path(os.confstr("CS_DARWIN_USER_TEMP_DIR"))
+        except (ValueError, AttributeError, TypeError):
+            base = Path(os.environ.get("TMPDIR", "/tmp"))
+        d = base / "auto-device-lock"
+    else:
+        base = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        if not os.path.isdir(base):
+            base = os.environ.get("TMPDIR", "/tmp")
+            d = Path(base) / f"auto-device-lock-{os.getuid()}"
+            d.mkdir(mode=0o700, parents=True, exist_ok=True)
+            return d
+        d = Path(base) / "auto-device-lock"
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return d
+
+
+def state_dir() -> Path:
+    """Survives reboot. Holds affinity only — never leases."""
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    d = Path(base) / "auto-device-lock"
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return d
+
+
+def boot_id() -> str:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        pass
+    try:  # macOS: kern.boottime is stable for the life of the boot
+        out = subprocess.run(["sysctl", "-n", "kern.boottime"],
+                             capture_output=True, text=True, timeout=5).stdout
+        m = re.search(r"sec\s*=\s*(\d+)", out)
+        if m:
+            return "boottime-" + m.group(1)
+    except Exception:
+        pass
+    return "unknown-boot"
+
+
+def host_id() -> str:
+    return os.uname().nodename
+
+
+# ------------------------------------------------------------------ liveness
+
+def proc_starttime(pid: int) -> str | None:
+    """Field 22 of /proc/pid/stat, parsed safely.
+
+    comm (field 2) is parenthesised and may itself contain spaces and ')', so
+    splitting the whole line on whitespace puts every later field at the wrong
+    index. Split after the LAST ') ' instead. A process named 'ev il) ) name'
+    makes awk '{print $22}' print 0 — a value that then compares equal for two
+    different processes, which is exactly how a lock gets handed to a stranger.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    try:
+        rest = raw.rsplit(") ", 1)[1].split()
+        return rest[19]          # field 22 overall == index 19 after state
+    except IndexError:
+        return None
+
+
+def proc_comm(pid: int) -> str | None:
+    try:
+        return Path(f"/proc/{pid}/comm").read_text().strip()
+    except OSError:
+        return None
+
+
+def proc_ppid(pid: int) -> int | None:
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+        return int(raw.rsplit(") ", 1)[1].split()[1])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+UNKNOWN = "?"          # could not determine — never the same as "gone"
+
+
+def _bsd_starttime(pid: int) -> str | None:
+    """macOS has no /proc. `ps -o lstart=` renders a LOCAL, LOCALE-FORMATTED
+    time, so the same process reads differently after a DST rollover, a TZ
+    change or a locale change — and a lease written before would then look like
+    a different process. Pin the environment on the subprocess itself; the Bash
+    tool does not guarantee the caller's exports reach here."""
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            env={"LC_ALL": "C", "TZ": "UTC", "PATH": "/usr/bin:/bin"},
+            capture_output=True, text=True, timeout=5)
+    except Exception:
+        return UNKNOWN                      # ps itself failed: we do not know
+    if out.returncode != 0:
+        return None                         # ps ran and found no such process
+    return out.stdout.strip() or None
+
+
+def identity(pid: int) -> str | None:
+    """A value that changes if this PID is reused by a different process.
+
+    Returns None only when the process is provably gone, and UNKNOWN when we
+    could not find out. Those must not be conflated: mapping "cannot tell" to
+    "dead" is how a reaper hands a live session's phone to someone else.
+    """
+    if os.path.isdir("/proc"):
+        return proc_starttime(pid)
+    return _bsd_starttime(pid)
+
+
+def alive(holder: dict) -> bool:
+    """True only if the exact process that took the lease is still running.
+
+    Not 'the PID exists' — PIDs are reused. Not 'the heartbeat is fresh' — an
+    agent that thinks for four minutes without running a command has a stale
+    heartbeat and a perfectly healthy session.
+    """
+    if holder.get("host") != host_id():
+        # Another machine's lease. We cannot read its /proc, so we cannot prove
+        # it is dead — and "cannot prove dead" must mean "leave it alone", not
+        # "reap it". Reaping on inability to verify is how a shared registry
+        # hands one board to two machines.
+        return True
+    if holder.get("boot_id") != boot_id():
+        return False        # same host, earlier boot: nothing it held survives
+    pid = holder.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    cur = identity(pid)
+    if cur == UNKNOWN or holder.get("start") == UNKNOWN:
+        return True             # cannot determine: leave the lease alone
+    return cur is not None and cur == holder.get("start")
+
+
+# ------------------------------------------------------------- session anchor
+
+def anchor(explicit: int | None = None) -> dict:
+    """The process whose death should free this session's devices.
+
+    Walk up from here past every shell/wrapper frame. In Claude Code the first
+    frame that is not transparent is the `claude` binary itself, which lives for
+    the whole session while each Bash call is a `bash -c` that exits in
+    milliseconds. Binding the lease to that PID is what makes a crash — not a
+    command returning — the thing that releases a device.
+    """
+    if not explicit and os.environ.get("CLAUDE_DEVLOCK_OWNER"):
+        # A detached or systemd-run payload has no `claude` ancestor to find —
+        # it was reparented. Env is useless for *discovering* a session, but it
+        # is the only channel for *propagating* one that is already resolved.
+        try:
+            b, pid_s, start, comm = os.environ["CLAUDE_DEVLOCK_OWNER"].split(":", 3)
+            return {"pid": int(pid_s), "start": start, "comm": comm,
+                    "boot_id": b, "host": host_id()}
+        except ValueError:
+            raise SystemExit("devlock: CLAUDE_DEVLOCK_OWNER is malformed; expected "
+                             "<boot_id>:<pid>:<starttime>:<comm>")
+    if explicit:
+        pid = explicit
+    elif os.environ.get("DEVLOCK_SESSION_PID"):
+        pid = int(os.environ["DEVLOCK_SESSION_PID"])
+    else:
+        pid = os.getpid()
+        for _ in range(64):
+            parent = proc_ppid(pid)
+            if not parent or parent == 1:
+                break
+            comm = proc_comm(parent)
+            if comm is None:
+                break
+            pid = parent
+            if comm not in _TRANSPARENT:
+                break
+    return {
+        "pid": pid,
+        "start": identity(pid),
+        "comm": proc_comm(pid) or "unknown",
+        "boot_id": boot_id(),
+        "host": host_id(),
+    }
+
+
+def window_id(anchor_pid: int) -> str:
+    """Editor window the session belongs to. ADVISORY ONLY — used for affinity,
+    never for ownership. Several sessions share one window, so a window is not a
+    holder.
+
+    One step up from the session, and only if that parent is an editor. Walking
+    further finds *an* editor process on a busy machine rather than *this*
+    session's, and a terminal-launched session has no window at all — which is a
+    correct answer, not a failure to search hard enough.
+    """
+    parent = proc_ppid(anchor_pid)
+    if not parent or parent == 1:
+        return "none"
+    comm = proc_comm(parent) or ""
+    if comm not in _WINDOWS:
+        return "none"
+    top, cur = parent, parent
+    for _ in range(32):          # outermost frame of the SAME editor tree
+        gp = proc_ppid(cur)
+        if not gp or gp == 1 or (proc_comm(gp) or "") not in _WINDOWS:
+            break
+        cur = top = gp
+    return f"{comm}:{top}:{identity(top)}"
+
+
+def same_session(holder: dict, me: dict) -> bool:
+    return (holder.get("pid") == me["pid"]
+            and holder.get("start") == me["start"]
+            and holder.get("boot_id") == me["boot_id"]
+            and holder.get("host") == me["host"])
+
+
+# ------------------------------------------------------------------ registry
+
+@contextmanager
+def registry(mutate: bool = True, wait: float = 30.0):
+    """Exclusive access to the registry.
+
+    The flock is taken on registry.lock, a file that is created once and then
+    never renamed, unlinked or replaced. The data lives in registry.json, which
+    IS replaced by rename — safe precisely because it is not the lock target.
+    Locking a file you then rename over gives every later arrival a lock on a
+    fresh inode and silent, total loss of mutual exclusion.
+    """
+    d = runtime_dir()
+    lock_path, data_path = d / "registry.lock", d / "registry.json"
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    deadline = time.monotonic() + wait
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if e.errno not in (errno.EWOULDBLOCK, errno.EACCES):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise SystemExit("devlock: registry busy; another session is "
+                                     "mid-transaction. Retry.")
+                time.sleep(0.05)
+        # The file we locked must still be the file at that path. Replacing a
+        # lock file (an editor save, a git checkout, any tmpfile+rename onto it)
+        # gives every later arrival a lock on a fresh inode, and two holders
+        # then both believe they are exclusive with no error anywhere. The lock
+        # target is never renamed by this tool; this catches anyone else doing it.
+        try:
+            if os.stat(lock_path).st_ino != os.fstat(fd).st_ino:
+                raise SystemExit(
+                    "devlock: the registry lock file was replaced underneath us. "
+                    "Mutual exclusion is not currently guaranteed — re-run the "
+                    "command, and if it repeats, find what is rewriting "
+                    f"{lock_path}")
+        except FileNotFoundError:
+            raise SystemExit(f"devlock: {lock_path} was deleted underneath us; "
+                             "re-run the command")
+        try:
+            data = json.loads(data_path.read_text())
+            if data.get("schema") != SCHEMA:
+                _salvage(data_path, f"schema {data.get('schema')} != {SCHEMA}")
+                data = _empty()
+        except OSError:
+            data = _empty()
+        except ValueError as e:
+            # A truncated or corrupt registry means every live lease just became
+            # invisible, and the next claim will hand out a device someone is
+            # using. Say so loudly and keep the wreckage for the human.
+            _salvage(data_path, str(e))
+            data = _empty()
+        data.setdefault("epoch", 0)
+        data.setdefault("leases", {})
+        state = {"data": data, "dirty": False}
+        yield state
+        if mutate and state["dirty"]:
+            tmp = data_path.with_suffix(f".tmp.{os.getpid()}")
+            tmp.write_text(json.dumps(data, indent=1, sort_keys=True))
+            os.replace(tmp, data_path)       # atomic; not the flock target
+    finally:
+        os.close(fd)                          # releases the flock, always
+
+
+def _salvage(path: Path, why: str) -> None:
+    keep = path.with_suffix(f".corrupt.{int(time.time())}")
+    try:
+        os.replace(path, keep)
+    except OSError:
+        keep = None
+    print(f"devlock: registry was unreadable ({why}); starting a new one."
+          + (f" Old file kept at {keep}." if keep else "")
+          + " Any lease it held is now unknown — run `devlock devices` and check "
+            "with the other sessions before claiming anything.", file=sys.stderr)
+    audit("registry-reset", why)
+
+
+def _empty() -> dict:
+    return {"schema": SCHEMA, "epoch": 0, "leases": {}, "boot_id": boot_id()}
+
+
+def audit(action: str, detail: str) -> None:
+    """Append one record to a log that survives reboot.
+
+    The leases live in tmpfs and are *meant* to vanish at boot. The history must
+    not: "which session took my phone at 4am" is unanswerable if the only record
+    was wiped by the reboot you are asking about.
+
+    One os.write() of one line. A single write(2) to a regular file is
+    serialised under the inode lock, which is what makes concurrent appends from
+    several sessions safe here — not PIPE_BUF, which governs pipes and would be
+    the wrong reason to trust this. Two writes, or a buffered writer that
+    flushes mid-line, would interleave. The line is capped so it stays one
+    write: a long --why is truncated rather than allowed to split the record.
+    """
+    rec = {"iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "action": action,
+           "detail": detail[:400], "pid": os.getpid(), "boot": boot_id()[:8]}
+    line = (json.dumps(rec, sort_keys=True) + "\n").encode()[:2048]
+    if not line.endswith(b"\n"):
+        line = line[:-1] + b"\n"
+    try:
+        fd = os.open(state_dir() / "audit.log",
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC, 0o600)
+        try:
+            os.write(fd, line)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def entomb(data: dict, cid: str, reason: str) -> None:
+    """Record why a lease ended, so the holder that lost it can find out.
+
+    A fenced session learns it was evicted from `verify`, but "STOLEN" alone
+    does not say whether it crashed, was frozen, or was taken deliberately —
+    and that is exactly the question at 4am. Bounded so it cannot grow forever.
+    """
+    lease = data["leases"].get(cid)
+    if not lease:
+        return
+    g = data.setdefault("graveyard", [])
+    g.append({"device": cid, "reason": reason, "epoch": lease.get("epoch"),
+              "holder": lease.get("holder"), "why": lease.get("why", ""),
+              "repo": lease.get("repo", ""), "ended": time.time()})
+    del g[:-64]
+    audit("evict", f"{cid} epoch {lease.get('epoch')} reason={reason} "
+                   f"holder={lease.get('holder', {}).get('pid')}")
+
+
+def epitaph(data: dict, cid: str, holder: dict) -> str:
+    """The most recent reason this holder lost this device, if any."""
+    for rec in reversed(data.get("graveyard", [])):
+        if rec["device"] == cid and rec.get("holder", {}).get("pid") == holder.get("pid"):
+            return rec["reason"]
+    return ""
+
+
+def reap(data: dict) -> list[str]:
+    """Drop every lease whose holder is provably gone. Idempotent, and it runs
+    inside the same transaction as whatever called it, so two sessions reaping
+    at once cannot both grant the freed device."""
+    dead = [k for k, v in data["leases"].items() if not alive(v["holder"])]
+    for k in dead:
+        entomb(data, k, "holder process is gone")
+        del data["leases"][k]
+    return dead
+
+
+# ------------------------------------------------------------ device identity
+
+def _sysfs_usb(usb_path: str) -> tuple[str | None, str | None]:
+    """(vendor id, USB serial) for an `adb devices -l` usb:BUS-PORT token."""
+    base = Path("/sys/bus/usb/devices") / usb_path
+    try:
+        return ((base / "idVendor").read_text().strip(),
+                (base / "serial").read_text().strip())
+    except OSError:
+        return (None, None)
+
+
+def _udev(dev: str) -> dict:
+    try:
+        out = subprocess.run(["udevadm", "info", "-q", "property", "-n", dev],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return {}
+    props = {}
+    for line in out.splitlines():
+        if "=" in line:
+            k, _, v = line.partition("=")
+            props[k] = v
+    return props
+
+
+_SENTINEL_SERIALS = {"0123456789abcdef", "0123456789", "00000000", "0000",
+                     "1234567890", "123456789", "deadbeef"}
+
+
+def weak_serial(serial: str | None) -> str:
+    """Why this serial may not uniquely identify one physical unit.
+
+    Vendors ship duplicate and placeholder serials constantly — two CP2102s both
+    reporting `0001` is the common case, not the rare one — and a short numeric
+    serial is a counter, not a UUID. A lock keyed on a colliding serial reports
+    success while protecting the wrong device, so say so rather than trusting it.
+    """
+    if not serial:
+        return "no serial at all"
+    low = serial.lower()
+    if low in _SENTINEL_SERIALS:
+        return "a known placeholder serial, not unique to this unit"
+    if len(serial) < 8:
+        return f"only {len(serial)} characters — likely a counter, not unique"
+    if serial.isdigit() and len(serial) < 12:
+        return "short and all-numeric — collides across units of the same model"
+    return ""
+
+
+def canonical(vid: str | None, serial: str | None) -> str | None:
+    """The one name a physical unit answers to, whatever cable you reach it by.
+
+    On this class of machine a phone is simultaneously an adb serial and, if it
+    exposes a CDC interface, a /dev/ttyACM*. Two sessions locking 'ttyACM1' and
+    'R52Y5057J4Y' both believe they are exclusive and are driving the same
+    hardware. Collapsing both onto usb:<vid>:<serial> is what stops that.
+    """
+    if vid and serial and serial not in ("", "0", "unknown"):
+        return f"usb:{vid.lower()}:{serial}"
+    return None
+
+
+def enumerate_devices() -> list[dict]:
+    devs: list[dict] = []
+
+    # --- Android over adb -----------------------------------------------
+    if shutil.which("adb"):
+        try:
+            out = subprocess.run(["adb", "devices", "-l"], capture_output=True,
+                                 text=True, timeout=20).stdout
+        except Exception:
+            out = ""
+        for line in out.splitlines()[1:]:
+            line = line.strip()
+            if not line or line.startswith("*"):
+                continue
+            parts = line.split()
+            serial, state = parts[0], parts[1] if len(parts) > 1 else "unknown"
+            tags = dict(p.split(":", 1) for p in parts[2:] if ":" in p)
+            usb = tags.get("usb")
+            vid, usb_serial = _sysfs_usb(usb) if usb else (None, None)
+            if serial.startswith("emulator-"):
+                cid, kind = f"emu:{serial}", "emulator"
+            elif ":" in serial or serial.startswith("adb-"):
+                cid, kind = f"net:{serial}", "android-net"
+            else:
+                cid = canonical(vid, usb_serial or serial) or f"adb:{serial}"
+                kind = "android"
+            devs.append({
+                "id": cid, "kind": kind, "adb_serial": serial, "state": state,
+                "model": tags.get("model", ""), "usb": usb or "",
+                "transport": tags.get("transport_id", ""),
+                # transport_id is deliberately NOT part of the identity: it is
+                # reassigned on every replug and on `adb reboot`.
+            })
+
+    # --- serial / USB boards --------------------------------------------
+    by_id = Path("/dev/serial/by-id")
+    seen_tty: dict[str, str] = {}
+    if by_id.is_dir():
+        for link in sorted(by_id.iterdir()):
+            try:
+                tty = os.path.realpath(link)
+            except OSError:
+                continue
+            if tty in seen_tty:
+                continue        # by-path lists usb- and usbv2- for one tty
+            seen_tty[tty] = link.name
+            props = _udev(tty)
+            cid = canonical(props.get("ID_VENDOR_ID"), props.get("ID_SERIAL_SHORT"))
+            if not cid:
+                idp = props.get("ID_PATH")
+                cid = f"path:{idp}" if idp else f"tty:{os.path.basename(tty)}"
+            devs.append({
+                "id": cid, "kind": "serial", "tty": tty, "state": "present",
+                "model": props.get("ID_MODEL", ""), "by_id": link.name,
+                "id_path": props.get("ID_PATH", ""),
+            })
+
+    # --- iOS, local or on a remote Mac ----------------------------------
+    if shutil.which("xcrun"):
+        try:
+            out = subprocess.run(
+                ["xcrun", "devicectl", "list", "devices", "--json-output", "-"],
+                capture_output=True, text=True, timeout=30).stdout
+            for d in (json.loads(out).get("result", {}).get("devices", []) or []):
+                udid = (d.get("hardwareProperties", {}).get("udid")
+                        or d.get("identifier"))
+                if udid:
+                    devs.append({"id": f"ios:{udid}", "kind": "ios",
+                                 "state": d.get("connectionProperties", {})
+                                           .get("tunnelState", "unknown"),
+                                 "model": d.get("deviceProperties", {})
+                                           .get("name", "")})
+        except Exception:
+            pass
+
+    # --- ambiguity: two endpoints, one name ------------------------------
+    merged: dict[str, dict] = {}
+    for d in devs:
+        cid = d["id"]
+        if cid in merged:
+            # Same physical unit reached two ways (adb + tty). Union the facets;
+            # one lease covers the hardware, not the cable.
+            for k, v in d.items():
+                merged[cid].setdefault(k, v)
+                if k in ("tty", "adb_serial") and v:
+                    merged[cid][k] = v
+            merged[cid]["facets"] = merged[cid].get("facets", 1) + 1
+        else:
+            merged[cid] = dict(d, facets=1)
+    return sorted(merged.values(), key=lambda x: x["id"])
+
+
+def resolve(sel: str, devs: list[dict]) -> dict | None:
+    """Accept a canonical id, an adb serial, a tty, a by-id name or a model."""
+    for d in devs:
+        if sel == d["id"]:
+            return d
+    hits = [d for d in devs
+            if sel in (d.get("adb_serial"), d.get("tty"), d.get("by_id"))
+            or (d.get("model") and sel.lower() == d["model"].lower())
+            or (d.get("tty") and sel == os.path.basename(d["tty"]))]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        raise SystemExit(f"devlock: '{sel}' is ambiguous — matches "
+                         + ", ".join(h["id"] for h in hits)
+                         + ". Use the canonical id.")
+    return None
+
+
+# -------------------------------------------------------------------- policy
+
+def policy() -> dict:
+    """Optional per-user policy: devices that must never be automated, and
+    friendly aliases. Absent file means no policy, not an error."""
+    for p in (Path(os.environ.get("DEVLOCK_POLICY", "")) if os.environ.get("DEVLOCK_POLICY") else None,
+              state_dir() / "policy.json"):
+        if p and p.is_file():
+            try:
+                return json.loads(p.read_text())
+            except ValueError:
+                raise SystemExit(f"devlock: {p} is not valid JSON")
+    return {}
+
+
+def affinity_load() -> dict:
+    p = state_dir() / "affinity.json"
+    try:
+        return json.loads(p.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def affinity_save(a: dict) -> None:
+    p = state_dir() / "affinity.json"
+    tmp = p.with_suffix(f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(a, indent=1, sort_keys=True))
+    os.replace(tmp, p)
+
+
+def affinity_keys(repo: str, win: str) -> tuple[str, str]:
+    """(window-scoped, repo-scoped). A terminal-launched session has no window,
+    so it falls back to the repo key alone rather than inventing a window."""
+    return (f"{repo}\x00{win}", repo)
+
+
+# ------------------------------------------------------------------ commands
+
+def cmd_devices(args) -> int:
+    devs = enumerate_devices()
+    pol = policy()
+    with registry(mutate=True) as st:
+        st["dirty"] = bool(reap(st["data"]))
+        leases = dict(st["data"]["leases"])
+    if args.json:
+        for d in devs:
+            d["lease"] = leases.get(d["id"])
+            d["forbidden"] = d["id"] in pol.get("never_automate", [])
+        print(json.dumps(devs, indent=1))
+        return 0
+    if not devs:
+        print("no devices found")
+        return 0
+    for d in devs:
+        lease = leases.get(d["id"])
+        who = (f"HELD by {lease['holder']['comm']}:{lease['holder']['pid']}"
+               f" ({lease.get('why', 'no reason given')})" if lease else "free")
+        flag = "  FORBIDDEN-BY-POLICY" if d["id"] in pol.get("never_automate", []) else ""
+        extra = d.get("adb_serial") or d.get("tty", "")
+        print(f"{d['id']:<34} {d['kind']:<10} {d.get('state',''):<9} "
+              f"{d.get('model',''):<16} {extra:<22} {who}{flag}")
+        w = weak_serial(d["id"].split(":")[-1] if d["id"].startswith("usb:") else None)
+        if w:
+            print(f"{'':<34} ^ weak identity: {w}. Plug in a second unit of this "
+                  f"model and confirm the ids differ before trusting the lock.")
+    if any(d["facets"] > 1 for d in devs):
+        print("\nnote: a device shown once may be reachable two ways (adb and a "
+              "tty). One lease covers the hardware, not the cable.")
+    return 0
+
+
+def cmd_status(args) -> int:
+    me = anchor()
+    with registry(mutate=True) as st:
+        dead = reap(st["data"])
+        st["dirty"] = bool(dead)
+        leases = dict(st["data"]["leases"])
+        epoch = st["data"]["epoch"]
+    if args.json:
+        print(json.dumps({"me": me, "window": window_id(me["pid"]),
+                          "epoch": epoch, "reaped": dead, "leases": leases},
+                         indent=1))
+        return 0
+    print(f"this session: pid {me['pid']} ({me['comm']}) "
+          f"window {window_id(me['pid'])}")
+    if dead:
+        print(f"reaped {len(dead)} lease(s) from dead sessions: {', '.join(dead)}")
+    if not leases:
+        print("no devices claimed by anyone")
+        return 0
+    for k, v in sorted(leases.items()):
+        h = v["holder"]
+        mine = " <- YOURS" if same_session(h, me) else ""
+        age = int(time.time() - v.get("taken", time.time()))
+        print(f"{k:<34} pid {h['pid']:<8} {h['comm']:<10} epoch {v['epoch']:<5} "
+              f"{age//60}m  {v.get('repo','')}  {v.get('why','')}{mine}")
+    return 0
+
+
+def _grant(data: dict, dev: dict, me: dict, args) -> dict:
+    data["epoch"] += 1
+    lease = {
+        "epoch": data["epoch"],
+        "holder": me,
+        "taken": time.time(),
+        "why": args.why or "",
+        "repo": args.repo or os.getcwd(),
+        "window": window_id(me["pid"]),
+        "mode": "exclusive",
+        "device": {k: dev.get(k, "") for k in
+                   ("kind", "adb_serial", "tty", "model", "by_id")},
+    }
+    data["leases"][dev["id"]] = lease
+    return lease
+
+
+def cmd_claim(args) -> int:
+    me = anchor()
+    if me["start"] is None:
+        raise SystemExit("devlock: cannot identify this session's process; "
+                         "pass --session-pid or set DEVLOCK_SESSION_PID")
+    pol = policy()
+    forbidden = set(pol.get("never_automate", []))
+    deadline = time.monotonic() + max(0.0, args.wait)
+    attempt = 0
+    while True:
+        attempt += 1
+        devs = enumerate_devices()
+        wanted, missing = [], []
+        for sel in args.device:
+            d = resolve(sel, devs)
+            (wanted.append(d) if d else missing.append(sel))
+        if missing:
+            raise SystemExit(
+                "devlock: no such device: " + ", ".join(missing)
+                + "\n  attached: " + (", ".join(d["id"] for d in devs) or "none")
+                + "\n  (a serial you cannot see in `devlock devices` is a serial "
+                  "you invented)")
+        bad = [d["id"] for d in wanted if d["id"] in forbidden]
+        if bad:
+            print(f"devlock: policy forbids automating {', '.join(bad)}",
+                  file=sys.stderr)
+            return RC_POLICY
+        unusable = [d for d in wanted
+                    if d["kind"].startswith("android") and d["state"] != "device"]
+        if unusable and not args.allow_unhealthy:
+            raise SystemExit("devlock: " + ", ".join(
+                f"{d['id']} is '{d['state']}', not 'device'" for d in unusable)
+                + "\n  unauthorized/offline/recovery devices accept some commands "
+                  "and silently drop others. Fix the device, or --allow-unhealthy.")
+
+        # Sorting by canonical id gives every session the same acquisition
+        # order, which is what makes a multi-device claim deadlock-free.
+        wanted.sort(key=lambda d: d["id"])
+        with registry(mutate=True) as st:
+            data = st["data"]
+            reap(data)
+            st["dirty"] = True
+            taken = [d for d in wanted
+                     if d["id"] in data["leases"]
+                     and not same_session(data["leases"][d["id"]]["holder"], me)]
+            if not taken:
+                out = []
+                for d in wanted:
+                    old = data["leases"].get(d["id"])
+                    if old and same_session(old["holder"], me):
+                        old["why"] = args.why or old.get("why", "")
+                        out.append((d, old))       # re-claim: same epoch, no churn
+                    else:
+                        out.append((d, _grant(data, d, me, args)))
+                        audit("claim", f"{d['id']} epoch {data['epoch']} "
+                                       f"pid {me['pid']} {args.why or ''}")
+                aff = affinity_load()
+                k1, k2 = affinity_keys(args.repo or os.getcwd(),
+                                       window_id(me["pid"]))
+                # Merge per kind, never wholesale: claiming the ESP32 must not
+                # erase the memory of which phone this window's screenshots came
+                # from. Consistency across a suite is the whole point.
+                for k in (k1, k2):
+                    rec = aff.get(k) or {}
+                    by_kind = dict(rec.get("by_kind") or {})
+                    for d, _ in out:
+                        by_kind[d["kind"]] = d["id"]
+                    aff[k] = {"by_kind": by_kind,
+                              "devices": sorted(set(by_kind.values())),
+                              "at": time.time()}
+                affinity_save(aff)
+                break
+            held = {d["id"]: data["leases"][d["id"]] for d in taken}
+        # All-or-nothing: nothing was granted, so nothing must be released.
+        if time.monotonic() >= deadline:
+            for cid, l in held.items():
+                h = l["holder"]
+                print(f"devlock: {cid} is held by {h['comm']}:{h['pid']} "
+                      f"({l.get('why','no reason')}) in {l.get('repo','')}",
+                      file=sys.stderr)
+            print("devlock: claimed nothing. Wait, pick another device "
+                  "(`devlock devices`), or ask the human before taking one.",
+                  file=sys.stderr)
+            return RC_HELD
+        # Jitter, or two sessions retry in lockstep forever.
+        time.sleep(min(2.0, 0.2 * attempt) * (0.5 + (os.getpid() % 100) / 100.0))
+
+    for d, lease in out:
+        print(f"held {d['id']} epoch {lease['epoch']}"
+              + (f"  ANDROID_SERIAL={d['adb_serial']}" if d.get("adb_serial") else "")
+              + (f"  PORT={d['tty']}" if d.get("tty") else ""))
+    if args.env:
+        _print_env([d for d, _ in out])
+    return 0
+
+
+def _print_env(devs: list[dict]) -> None:
+    a = [d for d in devs if d.get("adb_serial")]
+    if len(a) == 1:
+        print(f"export ANDROID_SERIAL={a[0]['adb_serial']}")
+    elif len(a) > 1:
+        print("# several Android devices held; -s per command, no ANDROID_SERIAL")
+        for d in a:
+            print(f"# adb -s {d['adb_serial']}   # {d.get('model','')}")
+    t = [d for d in devs if d.get("tty")]
+    if len(t) == 1:
+        print(f"export DEVLOCK_PORT={t[0]['tty']}")
+    elif len(t) > 1:
+        for d in t:
+            print(f"# {d['id']} -> {d['tty']}")
+
+
+def cmd_check(args) -> int:
+    """One line, one exit code, no interpretation required.
+
+    This is the gate to put in front of device work — `devlock check <id> &&
+    <command>` — because a multi-line report invites an agent to skim it and
+    proceed anyway. Every non-OK line ends with the exact command that fixes it.
+    """
+    me = anchor()
+    # check reaps. It is the gate every session runs before touching hardware,
+    # so it is the right place to notice that a holder died — otherwise the
+    # first session to ask "may I?" is told "no" by a lease with no process
+    # behind it, and waits for a holder that will never release.
+    with registry(mutate=True) as st:
+        data = st["data"]
+        st["dirty"] = bool(reap(data))
+        leases = dict(data["leases"])
+    devs = enumerate_devices()
+    d = resolve(args.device, devs) if args.device else None
+    if args.device:
+        cid = d["id"] if d else args.device
+    else:
+        held = sorted(k for k, v in leases.items() if same_session(v["holder"], me))
+        if not held:
+            print("FREE      nothing held by this session -> devlock devices")
+            return RC_FREE
+        if len(held) > 1:
+            print(f"OK        {len(held)} devices held: {' '.join(held)} "
+                  f"-> devlock verify")
+            return RC_OK
+        cid, d = held[0], resolve(held[0], devs)
+    lease = leases.get(cid)
+    name = (d.get("model") or d.get("by_id") or "") if d else ""
+    if not lease:
+        why = epitaph(data, cid, me)
+        print(f"FREE      {cid} {name} unclaimed"
+              + (f" [you lost it: {why}]" if why else "")
+              + f" -> devlock claim {cid} --why '<what for>'")
+        return RC_FREE
+    if not same_session(lease["holder"], me):
+        h = lease["holder"]
+        print(f"HELD      {cid} {name} by {h['comm']}:{h['pid']} "
+              f"({lease.get('why', 'no reason')}) -> devlock devices  # pick another")
+        return RC_HELD
+    if args.epoch and str(lease["epoch"]) != str(args.epoch):
+        print(f"FENCED    {cid} epoch {lease['epoch']} != your {args.epoch} "
+              f"-> devlock claim {cid} --why '<what for>'  # and redo the work")
+        return RC_FENCED
+    if d is None:
+        print(f"ABSENT    {cid} {name} leased to you but not attached "
+              f"-> replug it, then devlock check {cid}")
+        return RC_ABSENT
+    if d.get("state") not in ("device", "present", "connected", "unknown", ""):
+        print(f"UNHEALTHY {cid} {name} state '{d['state']}' "
+              f"-> fix the device, then devlock check {cid}")
+        return RC_UNHEALTHY
+    sel = d.get("adb_serial") or d.get("tty") or ""
+    print(f"OK        {cid} {name} {sel} epoch {lease['epoch']}")
+    return RC_OK
+
+
+def cmd_verify(args) -> int:
+    """The fence check. Run it before every batch of device work.
+
+    A session that was declared dead and had its device reassigned can wake up
+    and keep issuing commands. The epoch it recorded at claim time no longer
+    matches the epoch in the registry, and that mismatch is the only thing
+    standing between a resumed session and a flash into someone else's board.
+    """
+    me = anchor()
+    with registry(mutate=False) as st:
+        leases = st["data"]["leases"]
+    devs = enumerate_devices()
+    with registry(mutate=False) as st2:
+        graves = st2["data"]
+    targets = args.device or sorted(
+        k for k, v in leases.items() if same_session(v["holder"], me))
+    if not targets:
+        print("NOTHING HELD  this session holds no devices")
+        return RC_FREE
+    bad = 0
+    for sel in targets:
+        d = resolve(sel, devs)
+        cid = d["id"] if d else sel
+        lease = leases.get(cid)
+        if not lease:
+            why = epitaph(graves, cid, me)
+            print(f"NOT HELD  {cid}  (no lease — claim it before touching it)"
+                  + (f"  [you lost it: {why}]" if why else ""))
+            bad += 1
+        elif not same_session(lease["holder"], me):
+            h = lease["holder"]
+            why = epitaph(graves, cid, me)
+            print(f"STOLEN    {cid}  now held by {h['comm']}:{h['pid']} "
+                  f"epoch {lease['epoch']} — do not touch it"
+                  + (f"  [{why}]" if why else ""))
+            bad += 1
+        elif args.epoch and str(lease["epoch"]) != str(args.epoch):
+            print(f"FENCED    {cid}  epoch is {lease['epoch']}, you recorded "
+                  f"{args.epoch} — your lease lapsed and was re-granted")
+            bad += 1
+        elif not d:
+            print(f"ABSENT    {cid}  leased to you but not attached right now")
+            bad += 1
+        elif d.get("state") not in ("device", "present", "connected", "unknown", ""):
+            print(f"UNHEALTHY {cid}  state '{d['state']}'")
+            bad += 1
+        else:
+            print(f"OK        {cid}  epoch {lease['epoch']}"
+                  + (f"  {d['adb_serial']}" if d.get("adb_serial") else "")
+                  + (f"  {d['tty']}" if d.get("tty") else ""))
+    return RC_OK if bad == 0 else RC_FENCED
+
+
+def cmd_env(args) -> int:
+    """Re-establish this session's device bindings for the current shell.
+
+    Every agent Bash call is a fresh `bash -c` that exits, so an `export` from
+    the last call is gone. `eval "$(devlock env)"` at the top of a call is how a
+    session keeps pointing at the phone it actually leased instead of falling
+    back to whatever adb picks. It exits nonzero and exports nothing if the
+    lease is gone, so `eval "$(devlock env)" || exit 1` is a fence check too.
+    """
+    me = anchor()
+    with registry(mutate=False) as st:
+        leases = st["data"]["leases"]
+    devs = enumerate_devices()
+    mine = []
+    for cid, l in sorted(leases.items()):
+        if not same_session(l["holder"], me):
+            continue
+        d = resolve(cid, devs)
+        if d is None:
+            print(f"# {cid} is leased to you but not attached", file=sys.stderr)
+            continue
+        mine.append(dict(d, _epoch=l["epoch"]))
+    if not mine:
+        print("# no devices held by this session — claim one first", file=sys.stderr)
+        return 1
+    _print_env(mine)
+    for d in mine:
+        print(f"export DEVLOCK_EPOCH_{re.sub(r'[^A-Za-z0-9]', '_', d['id'])}="
+              f"{d['_epoch']}")
+    return 0
+
+
+def cmd_release(args) -> int:
+    me = anchor()
+    with registry(mutate=True) as st:
+        data = st["data"]
+        reap(data)
+        st["dirty"] = True
+        mine = [k for k, v in data["leases"].items() if same_session(v["holder"], me)]
+        if args.all:
+            targets = mine
+        else:
+            devs = enumerate_devices()
+            targets = []
+            for sel in args.device:
+                d = resolve(sel, devs)
+                targets.append(d["id"] if d else sel)
+        freed, notmine = [], []
+        for cid in targets:
+            l = data["leases"].get(cid)
+            if not l:
+                continue                       # already released: not an error
+            if not same_session(l["holder"], me):
+                notmine.append(cid)
+                continue
+            del data["leases"][cid]
+            freed.append(cid)
+            audit("release", f"{cid} pid {me['pid']}")
+    for cid in freed:
+        print(f"released {cid}")
+    for cid in notmine:
+        print(f"refused {cid}: not yours to release", file=sys.stderr)
+    if not freed and not notmine:
+        print("nothing to release")
+    return RC_HELD if notmine else RC_OK
+
+
+def cmd_steal(args) -> int:
+    """Take a device from a holder that is alive. Deliberately awkward."""
+    me = anchor()
+    if not args.reason:
+        raise SystemExit("devlock: --reason is required to steal")
+    with registry(mutate=True) as st:
+        data = st["data"]
+        reap(data)
+        st["dirty"] = True
+        devs = enumerate_devices()
+        d = resolve(args.device, devs)
+        cid = d["id"] if d else args.device
+        l = data["leases"].get(cid)
+        if not l:
+            raise SystemExit(f"devlock: {cid} is not held — just claim it")
+        if same_session(l["holder"], me):
+            raise SystemExit(f"devlock: you already hold {cid}")
+        h = l["holder"]
+        if not args.confirm:
+            raise SystemExit(
+                f"devlock: {cid} is held by a LIVE session {h['comm']}:{h['pid']} "
+                f"in {l.get('repo','?')} for '{l.get('why','?')}'.\n"
+                f"  Stealing it will break that session's test mid-run.\n"
+                f"  A human must say yes. Re-run with --confirm once they have.")
+        entomb(data, cid, f"stolen by pid {me['pid']}: {args.reason}")
+        del data["leases"][cid]
+        lease = _grant(data, d, me, argparse.Namespace(
+            why=f"STOLEN: {args.reason}", repo=args.repo or os.getcwd()))
+    print(f"stole {cid} epoch {lease['epoch']} from pid {h['pid']}")
+    print("the previous holder's next `devlock verify` will report FENCED.")
+    return 0
+
+
+def cmd_affinity(args) -> int:
+    me = anchor()
+    repo = args.repo or os.getcwd()
+    k1, k2 = affinity_keys(repo, window_id(me["pid"]))
+    aff = affinity_load()
+    rec = aff.get(k1) or aff.get(k2)
+    if not rec:
+        print("no affinity recorded for this window/repo")
+        return 1
+    scope = "this window" if k1 in aff else "this repo, another window"
+    print(f"{scope}: {' '.join(rec.get('devices', []))}")
+    for kind, cid in sorted((rec.get("by_kind") or {}).items()):
+        attached = resolve(cid, enumerate_devices())
+        print(f"  {kind:<12} {cid}"
+              + ("" if attached else "   (not attached right now)"))
+    return 0
+
+
+def cmd_whoami(args) -> int:
+    me = anchor()
+    print(json.dumps({"session": me, "window": window_id(me["pid"]),
+                      "runtime_dir": str(runtime_dir()),
+                      "repo": os.getcwd(), "version": VERSION}, indent=1))
+    return 0
+
+
+def cmd_reap(args) -> int:
+    with registry(mutate=True) as st:
+        dead = reap(st["data"])
+        st["dirty"] = bool(dead)
+    print(f"reaped {len(dead)}: {', '.join(dead) if dead else 'nothing stale'}")
+    return 0
+
+
+# ---------------------------------------------------------------------- hooks
+
+# Commands that reach a physical device. Anything not listed is none of our
+# business — a hook that guesses broadly gets disabled by the first false
+# positive, and a disabled hook protects nothing.
+_DEVICE_TOOLS = {
+    "adb": "android", "fastboot": "android", "scrcpy": "android",
+    "esptool": "serial", "esptool.py": "serial", "idf.py": "serial",
+    "pio": "serial", "platformio": "serial", "mpremote": "serial",
+    "ampy": "serial", "rshell": "serial", "avrdude": "serial",
+    "picocom": "serial", "minicom": "serial", "cu": "serial",
+    "xcrun": "ios", "ios-deploy": "ios", "devicectl": "ios",
+}
+# adb subcommands that inspect the daemon rather than drive a device.
+_ADB_SAFE = {"devices", "version", "help", "start-server", "--version"}
+
+
+def _tokens(cmd: str) -> list[str]:
+    try:
+        import shlex
+        return shlex.split(cmd, comments=True)
+    except ValueError:
+        return cmd.split()
+
+
+def _guard(cmd: str, mine: dict, devs: list[dict]) -> str | None:
+    """Return a refusal message, or None to allow. Conservative by design."""
+    toks = _tokens(cmd)
+    if not toks:
+        return None
+    held_serials = {d.get("adb_serial") for d in mine.values() if d.get("adb_serial")}
+    held_ttys = {d.get("tty") for d in mine.values() if d.get("tty")}
+
+    i = 0
+    while i < len(toks):
+        t = os.path.basename(toks[i].strip("'\""))
+        kind = _DEVICE_TOOLS.get(t)
+        if kind is None:
+            i += 1
+            continue
+        rest = toks[i + 1:]
+        if t == "adb":
+            sub = next((r for r in rest if not r.startswith("-")), "")
+            if sub in _ADB_SAFE and "-s" not in rest:
+                return None
+            if "kill-server" in rest:
+                return ("`adb kill-server` on a machine running several agent "
+                        "sessions drops every other session's device mid-command. "
+                        "Never run it here.")
+            if "-s" in rest:
+                serial = rest[rest.index("-s") + 1] if len(rest) > rest.index("-s") + 1 else ""
+                if serial in held_serials:
+                    return None
+                return (f"this session does not hold the device '{serial}'. "
+                        f"Run: devlock claim {serial} --why '<what for>'")
+            if held_serials:
+                return ("adb without -s picks a device for you. You hold "
+                        + ", ".join(sorted(held_serials))
+                        + " — name it: eval \"$(devlock env)\" && adb -s "
+                          "\"$ANDROID_SERIAL\" ...")
+            n = len([d for d in devs if d["kind"].startswith("android")])
+            return (f"no Android device is leased to this session and {n} are "
+                    f"attached. Bare adb silently picks one — and with exactly "
+                    f"one attached it works today and hits the wrong phone "
+                    f"tomorrow. Run: devlock devices, then devlock claim <id> "
+                    f"--why '<what for>'")
+        if kind == "serial":
+            port = next((r for r in rest if r.startswith("/dev/tty")), None)
+            if port is None:
+                pi = next((j for j, r in enumerate(rest)
+                           if r in ("-p", "--port", "--device")), None)
+                port = rest[pi + 1] if pi is not None and pi + 1 < len(rest) else None
+            if port and port in held_ttys:
+                return None
+            if port:
+                return (f"this session does not hold {port}. Claim it first: "
+                        f"devlock claim {port} --why '<what for>'. Opening a "
+                        f"board another session is flashing corrupts the flash.")
+            if held_ttys:
+                return None      # a held board and no explicit port: let it run
+            return (f"`{t}` reaches a serial board and this session holds none. "
+                    f"Run: devlock devices, then devlock claim <id>.")
+        if kind == "ios":
+            if t == "xcrun" and not any(r in ("devicectl", "simctl") for r in rest):
+                return None
+            if mine:
+                return None
+            return ("no iOS device is leased to this session. "
+                    "Run: devlock devices, then devlock claim <id>.")
+        i += 1
+    return None
+
+
+def cmd_hook(args) -> int:
+    """Fail open, always. A hook that errors must never block the user's work."""
+    try:
+        if args.event == "session-start":
+            me = anchor()
+            with registry(mutate=True) as st:
+                dead = reap(st["data"])
+                st["dirty"] = bool(dead)
+                leases = dict(st["data"]["leases"])
+            devs = enumerate_devices()
+            mine = [k for k, v in leases.items() if same_session(v["holder"], me)]
+            others = [k for k in leases if k not in mine]
+            free = [d["id"] for d in devs if d["id"] not in leases]
+            bits = [f"auto-device-lock: {len(devs)} device(s) attached; "
+                    f"{len(free)} free, {len(others)} held by other sessions."]
+            if dead:
+                bits.append(f"Reaped {len(dead)} lease(s) from sessions that died: "
+                            + ", ".join(dead) + ".")
+            if mine:
+                bits.append("This session already holds: " + ", ".join(mine) + ".")
+            else:
+                aff = affinity_load()
+                k1, k2 = affinity_keys(os.getcwd(), window_id(me["pid"]))
+                rec = aff.get(k1) or aff.get(k2)
+                if rec:
+                    avail = [c for c in rec.get("devices", [])
+                             if c not in leases and resolve(c, devs)]
+                    if avail:
+                        bits.append("This window last used " + ", ".join(avail)
+                                    + " — reclaim it to keep screenshots "
+                                      "consistent: devlock claim "
+                                    + " ".join(avail) + " --why '<what for>'")
+            bits.append("Claim before you touch anything: devlock claim <id> "
+                        "--why '<what for>'; release when done.")
+            print(" ".join(bits))
+            return 0
+
+        if args.event == "pre-bash":
+            raw = sys.stdin.read()
+            if not raw.strip():
+                return 0
+            payload = json.loads(raw)
+            if payload.get("tool_name") != "Bash":
+                return 0
+            cmd = (payload.get("tool_input") or {}).get("command", "")
+            if not cmd or "devlock" in cmd:
+                return 0
+            me = anchor()
+            with registry(mutate=False) as st:
+                leases = st["data"]["leases"]
+            devs = enumerate_devices()
+            mine = {k: (resolve(k, devs) or {}) for k, v in leases.items()
+                    if same_session(v["holder"], me)}
+            msg = _guard(cmd, mine, devs)
+            if msg:
+                print(json.dumps({"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": "auto-device-lock: " + msg}}))
+            return 0
+    except Exception as e:                        # noqa: BLE001 — fail open
+        print(f"# auto-device-lock hook error (ignored): {e}", file=sys.stderr)
+    return 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="devlock", description=__doc__.split("\n")[0])
+    p.add_argument("--version", action="version", version=VERSION)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("devices", help="what is attached, and who holds it")
+    s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_devices)
+
+    s = sub.add_parser("status", help="every lease, and which are yours")
+    s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("claim", help="take devices, all or nothing")
+    s.add_argument("device", nargs="+")
+    s.add_argument("--why", default="", help="what you are doing with it")
+    s.add_argument("--repo", default="")
+    s.add_argument("--wait", type=float, default=0.0, help="seconds to wait")
+    s.add_argument("--env", action="store_true", help="print export lines")
+    s.add_argument("--allow-unhealthy", action="store_true")
+    s.add_argument("--session-pid", type=int)
+    s.set_defaults(fn=cmd_claim)
+
+    s = sub.add_parser("check", help="one line, one exit code: may I touch it?")
+    s.add_argument("device", nargs="?", default="")
+    s.add_argument("--epoch", default="")
+    s.set_defaults(fn=cmd_check)
+
+    s = sub.add_parser("verify", help="do I still hold these, at my epoch "
+                                      "(no args: everything you hold)")
+    s.add_argument("device", nargs="*")
+    s.add_argument("--epoch", default="", help="the epoch you recorded at claim")
+    s.set_defaults(fn=cmd_verify)
+
+    sub.add_parser("env", help='shell bindings for what you hold; use as '
+                                'eval "$(devlock env)"').set_defaults(fn=cmd_env)
+
+    s = sub.add_parser("release", help="give devices back")
+    s.add_argument("device", nargs="*")
+    s.add_argument("--all", action="store_true")
+    s.set_defaults(fn=cmd_release)
+
+    s = sub.add_parser("steal", help="take a live session's device (gated)")
+    s.add_argument("device"); s.add_argument("--reason", default="")
+    s.add_argument("--confirm", action="store_true"); s.add_argument("--repo", default="")
+    s.set_defaults(fn=cmd_steal)
+
+    s = sub.add_parser("affinity", help="which device this window/repo used last")
+    s.add_argument("--repo", default=""); s.set_defaults(fn=cmd_affinity)
+
+    s = sub.add_parser("hook", help="session-start / pre-bash hook entry points")
+    s.add_argument("event", choices=["session-start", "pre-bash"])
+    s.set_defaults(fn=cmd_hook)
+
+    sub.add_parser("whoami", help="this session's identity").set_defaults(fn=cmd_whoami)
+    sub.add_parser("reap", help="drop leases held by dead sessions").set_defaults(fn=cmd_reap)
+
+    args = p.parse_args()
+    if getattr(args, "session_pid", None):
+        os.environ["DEVLOCK_SESSION_PID"] = str(args.session_pid)
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
