@@ -124,6 +124,8 @@ guard() {
 }
 # A guard that fires on prose gets switched off, and then it protects nothing.
 for c in "grep adb notes.txt" "man adb" "which adb" "rg -n adb ." \
+         "command -v adb" "type -p adb" "screen -ls" "screen -r work" \
+         "echo accumulate audio documents" \
          "echo see adb docs" "ls /opt/platform-tools/adb" "adb devices" "adb version"; do
   is "allows: $c" "$(guard "$c")" "ALLOW"
 done
@@ -132,9 +134,35 @@ done
 for c in "adb shell ls" "cd /tmp && adb devices -l && adb shell ls" \
          "sudo esptool.py --port /dev/ttyACM0 flash_id" \
          "for i in 1 2; do adb shell ls; done" "adb kill-server" \
-         "nohup adb logcat &" "timeout 5 adb shell ls"; do
+         "nohup adb logcat &" "timeout 5 adb shell ls" \
+         "cd /tmp/x#y && adb -s FOO shell ls" \
+         "git log --grep=#42 -1 && adb -s FOO install app.apk" \
+         "screen /dev/ttyUSB0 115200" "cu -l /dev/ttyUSB0" "pio run -t upload" \
+         "command adb shell ls"; do
   is "denies: $c" "$(guard "$c")" "DENY"
 done
+
+echo "guard: eval safety"
+# devlock env output is documented as something to eval, and a USB device picks
+# its own serial in firmware, so an unquoted value here is remote code execution
+# triggered by plugging a board in.
+evil=$(python3 - <<'PYX'
+import io, contextlib, os
+m = {}
+exec(compile(open(os.environ["AA_PATH"]).read().replace('if __name__ == "__main__":', "if False:"),
+             "devlock", "exec"), m)
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    m["_print_env"]([{"id": "usb:d:e", "kind": "android",
+                      "adb_serial": "X; touch /tmp/aw-rce-canary #", "_epoch": 1}])
+print(buf.getvalue().strip())
+PYX
+)
+rm -f /tmp/aw-rce-canary
+eval "$evil" 2>/dev/null
+[ -e /tmp/aw-rce-canary ] && bad "a hostile device serial cannot execute through eval" \
+  || ok "a hostile device serial cannot execute through eval"
+rm -f /tmp/aw-rce-canary
 
 echo "guard: prefilter"
 HOOK="$(dirname "$DL")/devlock-hook"
@@ -154,6 +182,21 @@ if [ -x "$HOOK" ]; then
     chmod +x "$SCRATCH/dh"
   printf '%s' '{"tool_input":{"command":"adb shell ls"}}' | "$SCRATCH/dh" pre-bash >/dev/null 2>&1
   is "a missing devlock binary fails open" "$?" "0"
+  # shlex is quadratic; a 2 MB heredoc took 49 s and blew the hook timeout,
+  # failing open on exactly the largest commands.
+  python3 -c "
+import json,sys;sys.stdout.write(json.dumps({'tool_name':'Bash','tool_input':{'command':'adb -s F shell '+'A'*2000000}}))" > "$SCRATCH/big.json"
+  t0=$(date +%s%N); "$HOOK" pre-bash < "$SCRATCH/big.json" >/dev/null 2>&1; t1=$(date +%s%N)
+  ms=$(( (t1-t0)/1000000 ))
+  [ "$ms" -lt 2000 ] && ok "a 2 MB command is handled in ${ms}ms, not tens of seconds" \
+    || bad "a 2 MB command took ${ms}ms"
+  # The prefilter must never be weaker than the tool it fronts.
+  for c in "adb -s F shell ls" "a''db -s F shell ls" "pio run -t upload" "git status"; do
+    j=$(python3 -c 'import json,sys;print(json.dumps({"tool_name":"Bash","tool_input":{"command":sys.argv[1]}}))' "$c")
+    a=$(printf '%s' "$j" | "$HOOK" pre-bash | head -c1)
+    b=$(printf '%s' "$j" | "$DL" hook pre-bash | head -c1)
+    is "prefilter agrees with the guard: $c" "$([ -n "$a" ] && echo D || echo A)" "$([ -n "$b" ] && echo D || echo A)"
+  done
 fi
 
 echo "robustness"

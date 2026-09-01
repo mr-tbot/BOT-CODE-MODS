@@ -21,11 +21,25 @@ if [ "$EVENT" != "pre-bash" ]; then
 fi
 
 payload=$(cat 2>/dev/null) || exit 0
-case "$payload" in
+
+# Normalise before matching, for two reasons.
+#
+# The prefilter globs the raw JSON while devlock tokenizes it, so the two
+# disagreed about what the command was: `a''db -s FOO shell ls` runs as adb, and
+# devlock denies it, but the raw text contains no "adb" so the prefilter let it
+# past — a one-character bypass of the thing it fronts. Deleting quote and
+# escape characters makes the probe agree with what the shell will execute.
+#
+# Turning JSON punctuation into spaces then lets the patterns below use word
+# boundaries, so short tool names like `pio` and `cu` can be matched without
+# also firing on "accumulate" or "audio".
+probe=$(printf '%s' "$payload" | tr -d "\\\\'\"" | tr ',:{}[]()' '        ')
+
+case " $probe " in
     # Anything that could open, flash, drive or enumerate a device.
-    *adb*|*fastboot*|*scrcpy*|*esptool*|*idf.py*|*platformio*|*\ pio\ *|\
-    *mpremote*|*ampy*|*rshell*|*avrdude*|*picocom*|*minicom*|*screen\ /dev/*|\
-    *xcrun*|*ios-deploy*|*devicectl*|*/dev/tty*|*/dev/serial/*)
+    *adb*|*fastboot*|*scrcpy*|*esptool*|*idf.py*|*platformio*|*avrdude*|\
+    *mpremote*|*ampy*|*rshell*|*picocom*|*minicom*|*xcrun*|*ios-deploy*|\
+    *devicectl*|*/dev/tty*|*/dev/serial/*|*\ pio\ *|*\ cu\ *|*\ screen\ *)
         printf '%s' "$payload" | "$DEVLOCK" hook pre-bash
         exit 0
         ;;

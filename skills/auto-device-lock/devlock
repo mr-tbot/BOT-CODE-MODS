@@ -19,6 +19,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -818,16 +819,24 @@ def cmd_claim(args) -> int:
 
 
 def _print_env(devs: list[dict]) -> None:
+    """Emit shell assignments for `eval "$(devlock env)"`.
+
+    Every value is shlex.quote'd. A USB device chooses its own iSerial in
+    firmware, so a serial is attacker-controlled input, and this output is
+    documented as something to eval — an unquoted `X; rm -rf ~ #` here is
+    remote code execution triggered by plugging a board in.
+    """
     a = [d for d in devs if d.get("adb_serial")]
     if len(a) == 1:
-        print(f"export ANDROID_SERIAL={a[0]['adb_serial']}")
+        print(f"export ANDROID_SERIAL={shlex.quote(str(a[0]['adb_serial']))}")
     elif len(a) > 1:
         print("# several Android devices held; -s per command, no ANDROID_SERIAL")
         for d in a:
-            print(f"# adb -s {d['adb_serial']}   # {d.get('model','')}")
+            print(f"# adb -s {shlex.quote(str(d['adb_serial']))}"
+                  f"   # {_safe(d.get('model',''))}")
     t = [d for d in devs if d.get("tty")]
     if len(t) == 1:
-        print(f"export DEVLOCK_PORT={t[0]['tty']}")
+        print(f"export DEVLOCK_PORT={shlex.quote(str(t[0]['tty']))}")
     elif len(t) > 1:
         for d in t:
             print(f"# {d['id']} -> {d['tty']}")
@@ -973,8 +982,8 @@ def cmd_env(args) -> int:
         return 1
     _print_env(mine)
     for d in mine:
-        print(f"export DEVLOCK_EPOCH_{re.sub(r'[^A-Za-z0-9]', '_', d['id'])}="
-              f"{d['_epoch']}")
+        print(f"export DEVLOCK_EPOCH_{re.sub(r'[^A-Za-z0-9]', '_', str(d['id']))}="
+              f"{shlex.quote(str(d['_epoch']))}")
     return 0
 
 
@@ -1091,16 +1100,42 @@ _DEVICE_TOOLS = {
     "pio": "serial", "platformio": "serial", "mpremote": "serial",
     "ampy": "serial", "rshell": "serial", "avrdude": "serial",
     "picocom": "serial", "minicom": "serial", "cu": "serial",
+    "screen": "serial",
     "xcrun": "ios", "ios-deploy": "ios", "devicectl": "ios",
 }
 # adb subcommands that inspect the daemon rather than drive a device.
 _ADB_SAFE = {"devices", "version", "help", "start-server", "--version"}
+# These reach a board only when a port is named. `screen -ls`, `cu` with no
+# line and `minicom` with a saved profile are not device operations, and
+# denying them is the false-positive class that gets a guard switched off.
+_PORT_REQUIRED = {"screen", "cu", "picocom", "minicom"}
+
+
+# No real device invocation is longer than a few KB, and shlex is O(n^2): a
+# 2 MB heredoc took 49 s to tokenize, blowing the hook timeout and failing open
+# on exactly the largest commands.
+_MAX_CMD = 65536
 
 
 def _tokens(cmd: str) -> list[str]:
+    """Tokenize a command the way the shell will run it.
+
+    `comments=True` was the default and it is wrong here: shlex truncates at the
+    first unquoted '#', while bash only starts a comment at a word start. So
+    `cd /tmp/x#y && adb -s FOO shell ls` tokenized to ['cd', '/tmp/x'] and the
+    adb invocation after it became invisible to the guard — a full bypass by
+    typing one character.
+    """
+    cmd = cmd[:_MAX_CMD]
     try:
-        import shlex
-        return shlex.split(cmd, comments=True)
+        # posix=True is what strips quoting, so a''db and ad"b" both resolve
+        # to adb the way the shell resolves them. punctuation_chars keeps &&,
+        # ; and | as their own tokens so one command's arguments cannot be
+        # read as another's.
+        lx = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lx.whitespace_split = True
+        lx.commenters = ""
+        return list(lx)
     except ValueError:
         return cmd.split()
 
@@ -1112,7 +1147,7 @@ _SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "{", "}", "do", "then",
                "else", "elif", "!"}
 # Wrappers that pass through to another command, which is the real invocation.
 _WRAPPERS = {"sudo", "doas", "env", "nohup", "setsid", "time", "timeout",
-             "command", "exec", "xargs", "stdbuf", "nice", "ionice"}
+             "command", "type", "exec", "xargs", "stdbuf", "nice", "ionice"}
 
 
 def _command_positions(toks: list[str]) -> list[int]:
@@ -1126,6 +1161,12 @@ def _command_positions(toks: list[str]) -> list[int]:
             continue
         base = os.path.basename(t.strip("'\""))
         if base in _WRAPPERS:
+            # `command -v adb` and `type -p adb` ask WHERE adb is; they do not
+            # run it. Denying a lookup is the false-positive class that gets a
+            # guard switched off.
+            if base in ("command", "type") and any(
+                    x in ("-v", "-V", "-p", "-P") for x in toks[i + 1:i + 3]):
+                return out
             skipping = True
             continue                  # still expecting the real command
         if "=" in t and not t.startswith("-") and re.match(r"^\w+=", t):
@@ -1196,6 +1237,8 @@ def _guard(cmd: str, mine: dict, devs: list[dict]) -> str | None:
                 port = rest[pi + 1] if pi is not None and pi + 1 < len(rest) else None
             if port and port in held_ttys:
                 continue
+            if port is None and t in _PORT_REQUIRED:
+                continue           # not a device operation without a port
             if port:
                 return (f"this session does not hold {port}. Claim it first: "
                         f"devlock claim {port} --why '<what for>'. Opening a "

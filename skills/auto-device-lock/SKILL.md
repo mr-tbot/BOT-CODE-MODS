@@ -115,7 +115,10 @@ to pick one for you and prints the per-device lines instead. Pass `-s` explicitl
 ```bash
 devlock check <id> && adb -s "$ANDROID_SERIAL" shell ...   # the gate: one line, one code
 devlock verify                                    # everything you hold, one line each
-devlock verify <id> --epoch "$DEVLOCK_EPOCH_<id>" # strict: also checks the fence token
+# strict form: devlock env exports one variable per held device, named after
+# its canonical id with every non-alphanumeric character replaced by _
+eval "$(devlock env)"
+devlock verify usb:22d9:EILF85KNDIXKGEDM --epoch "$DEVLOCK_EPOCH_usb_22d9_EILF85KNDIXKGEDM"
 ```
 
 Use `check` as a shell condition rather than something you read and interpret. It prints one line and
@@ -226,6 +229,19 @@ commands and silently drop others; `devlock claim` refuses them unless you pass 
 namespace — `fastboot devices` is not `adb devices` — so re-claim after the hop rather than assuming
 the lease followed it.
 
+## Environment
+
+| Variable | |
+|---|---|
+| `DEVLOCK_DIR` | Where the lease registry lives. Default `$XDG_RUNTIME_DIR/auto-device-lock`. Point it somewhere scratch to test without touching real leases |
+| `DEVLOCK_POLICY` | Path to the policy file, overriding `~/.local/state/auto-device-lock/policy.json` |
+| `DEVLOCK_SESSION_PID` | The process whose life the lease is bound to. Only for a detached child that has no agent ancestor to find |
+| `ANDROID_SERIAL`, `DEVLOCK_PORT`, `DEVLOCK_EPOCH_*` | Written by `devlock env`, read by you. Never set them by hand — `ANDROID_SERIAL` set by hand routes around the lock entirely |
+
+`devlock devices` runs `adb devices`, which **starts an adb server if none is running.** That is
+normally what you want, but it is a side effect: on a machine where the policy is one server, run it
+after the server is up rather than letting an arbitrary session start it.
+
 ## Step 7 — Devices That Must Never Be Automated
 
 Some hardware is off limits — a tablet that is someone's daily driver, a board wired into a rig, a
@@ -247,10 +263,10 @@ offer to install the two hooks — and **ask before editing the user's settings*
 
 ```jsonc
 // ~/.claude/settings.json
-"SessionStart": [ { "hooks": [ { "type": "command",
-    "command": "~/.claude/skills/auto-device-lock/devlock-hook session-start" } ] } ],
-"PreToolUse":   [ { "matcher": "Bash", "hooks": [ { "type": "command",
-    "command": "~/.claude/skills/auto-device-lock/devlock-hook pre-bash" } ] } ]
+"SessionStart": [ { "hooks": [ { "type": "command", "timeout": 10,
+    "command": "~/.claude/skills/auto-device-lock/devlock-hook session-start   # auto-device-lock" } ] } ],
+"PreToolUse":   [ { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 10,
+    "command": "~/.claude/skills/auto-device-lock/devlock-hook pre-bash   # auto-device-lock" } ] } ]
 ```
 
 The first prints the device situation into every session's context. The second **denies** a Bash call
@@ -258,6 +274,11 @@ that reaches hardware this session has not leased, with a message naming the com
 is what turns a convention into something an agent cannot absent-mindedly skip. Both fail open: any
 internal error allows the command through, because a guard that blocks work when it breaks is a guard
 the user disables within the hour.
+
+**Set the `timeout` and keep the `# auto-device-lock` marker.** Hook timeout defaults are not uniform
+across events and can be far longer than you would guess — a hook with none set was measured being
+waited on for two full minutes. The marker is how you find these entries again to remove them, since
+this skill ships no installer.
 
 Note the entry point is `devlock-hook`, not `devlock`. It is a shell prefilter that matches the
 command against the device tools with a `case` and only starts Python when one hits — 3 ms on an
