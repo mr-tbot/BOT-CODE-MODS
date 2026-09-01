@@ -1,6 +1,6 @@
 ---
 name: auto-audit-security
-description: "Use when a codebase needs an adversarial security review or compliance readiness assessment — web UI and API security, authentication and access control, licensing or paywall bypass, secrets exposure, dependency vulnerabilities, and SOC 2 / ISO 27001 / HIPAA / PCI DSS / GDPR readiness; when the user mentions security audit, pen test, SOC 2, compliance, Vanta, hardening, or says \"/auto-audit-security\"; or when about to call a system secure or compliant."
+description: "Use when a codebase needs an adversarial security review or compliance readiness assessment — web UI and API security, authentication and access control, licensing or paywall bypass, secrets exposure, dependency vulnerabilities, and SOC 2 / ISO 27001 / HIPAA / PCI DSS / GDPR readiness; when the user mentions security audit, pen test, red team, blue team, purple team, white team, tabletop or adversary emulation, SOC 2, compliance, Vanta, hardening, or says \"/auto-audit-security\"; or when about to call a system secure or compliant."
 ---
 
 # /auto-audit-security
@@ -39,6 +39,43 @@ Establish before running anything:
 3. **Which frameworks matter** — SOC 2, ISO 27001, HIPAA, PCI DSS, GDPR/CCPA, or none. Ask; do not
    assume, since the applicable set drives everything downstream.
 4. **Where findings may be written.** Not a public issue tracker. See Handling below.
+
+## Step 1b — Decide Which Seats You Are Sitting In
+
+An audit run from one seat produces one class of finding, and the classes it cannot produce look
+exactly like an absence of problems. Name the passes before you start, and record which you are
+**not** running and why — that list belongs in the report's methodology section, because an
+unexercised seat is a coverage gap, not a clean result.
+
+The colours are the InfoSec colour wheel (April C. Wright, 2017): red, blue and yellow are primary;
+purple, orange and green are their combinations. **White is the referee** — NIST defines a White Team
+as the group refereeing an engagement between a Red Team of mock attackers and a Blue Team of
+defenders, and here it is the seat that owns authorization, scope and evidence. **Black is not a
+standard term**; it is used here for the surface that is not the application.
+
+| Pass | Seat | What it establishes | Needs authorization? |
+|---|---|---|---|
+| **Red** | attacker | Reach an objective the way an attacker would: chain the medium findings, abuse the intended feature, bypass the paywall, escalate the role. Objective-led, not checklist-led | **Yes** for anything active |
+| **Blue** | defender | Would anyone have noticed? Are the auth failures, privilege changes, exports and admin actions logged, retained, alertable and attributable? Can you answer "what did this account do" | No |
+| **Yellow** | builder | Is the security control implemented where every caller passes through it, or reimplemented per route? Are the primitives the platform's own, or hand-rolled | No |
+| **Purple** | red + blue | For every Red finding: a **detection** for it, and a regression test. This is the pass that converts a one-off exercise into standing coverage | No |
+| **Orange** | yellow + red | For every Red finding: the change to *how it is built* that removes the class — a middleware, a type, a default, a lint rule | No |
+| **Green** | yellow + blue | Deployment reality: TLS and headers as actually served, secrets as actually injected, permissions on the running artifact, the database reachable from where it should not be | Read-only unless authorized |
+| **White** | referee | Authorization in writing, rules of engagement, what is out of bounds, what counts as evidence, where findings may be written, and the severity adjudication when passes disagree | Owns it |
+| **Black** | outside the app | Physical access, devices and removable media, the supply chain (dependencies, build infrastructure, signing keys, CI credentials), and the human path — support tooling, account recovery, social engineering. Almost always the least-tested surface | **Yes**, and usually out of scope |
+
+**Authorization is per pass, not per audit.** White grants Red and the active half of Green. Blue,
+Yellow, Purple and Orange are review passes over code and configuration you already own and need no
+new permission. Never let a Red objective drift into a Black one — social engineering and physical
+entry require separate, explicit, written authorization naming the people and premises involved, and
+their absence is a hard stop, not a judgement call.
+
+**Purple and Orange are derived.** They consume Red's findings, so they produce nothing before Red has
+run, and a report claiming them without a Red pass behind them is describing work that did not happen.
+
+**The most common real outcome** on a first audit is that Blue finds nothing to look at — no
+authentication logging, no alerting, no retention. Record that as the finding it is. "We would not
+know" is a more serious result than most of the mediums the scanners produce.
 
 ## Step 2 — Map The Attack Surface
 
@@ -237,6 +274,12 @@ covered (which branches, which commit, which environments), what each tool exami
 items it actually saw, what was skipped, and what could not be verified without an environment you did
 not have. Name which classes have no automated coverage.
 
+**State which team passes ran, and which did not.** A reader cannot calibrate a report without it: an
+audit with no Red pass has not tested exploitability, one with no Blue pass says nothing about
+detection, and one with no Black pass has not looked at the supply chain or the human path. List the
+seats exercised, the seats declined, and for each declined one whether it was out of scope, unauthorized,
+or simply not done.
+
 Close the loop on lifecycle: every finding needs a state — open, fixed, or **risk-accepted with an
 owner and a date**. A finding nobody accepted and nobody fixed is still open, and silently dropping it
 between runs is how a report becomes fiction.
@@ -275,6 +318,9 @@ attached, and that determination belongs to counsel — flag it, do not adjudica
 
 | Excuse | Reality |
 |---|---|
+| "We ran the audit" | From which seats? An audit with no Blue pass says nothing about whether you would notice |
+| "No detections fired, so nothing happened" | Or nothing is instrumented. Blue's first finding is usually that there is nothing to look at |
+| "Red found it, and we fixed it" | Half done. Purple asks for the detection and the regression test; Orange asks what stops the class |
 | "The scan came back clean" | Scanners barely find access-control bugs. That is the class that gets exploited |
 | "We're SOC 2 compliant now" | An audit firm says that after examining the organization. This is readiness |
 | "The UI hides it from free users" | Hidden is not disabled. Call the endpoint |

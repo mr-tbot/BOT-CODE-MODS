@@ -107,7 +107,7 @@ something finished before it demonstrably is.
 
 | Skill | Refuses to let you ship |
 |---|---|
-| **auto-audit** | A feature that compiles but moves zero bytes. Iterative audit → fix → build → verify → adversarially review, across every platform the project targets — the machine the agent runs on included — until a pass finds nothing |
+| **auto-audit** | A feature that compiles but moves zero bytes. Iterative audit → fix → build → verify → review, across every platform the project targets — the machine the agent runs on included — until a pass finds nothing. The review runs from each seat of the InfoSec colour wheel: a breaker, a defender and a builder find different defects, and none of them finds the others' |
 | **auto-rewrite** | Code that came from somewhere else. Duplication sweep, provenance search against the archives that actually hold the world's source, git forensics — then a remediation ladder where rewriting is the fifth option |
 | **auto-license-check** | A dependency whose license nobody read. Asks how you actually release before it scans, opens the shipped artifact rather than trusting metadata, and treats an unknown license as a blocker |
 | **auto-ui-ux** | An interface built in phases that never got unified — and controls that render beautifully while doing nothing. Drift, WCAG 2.2 AA in every theme, the state matrix, and a wiring pass that traces every control to a real effect |

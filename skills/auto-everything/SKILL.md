@@ -68,6 +68,13 @@ Their blockers become work items ahead of everything else.
 Run **`/auto-audit`**. This is the spine of the pass: every claimed feature traced to a real runtime
 path, on every platform the project targets, iterating until a pass finds nothing.
 
+**Its adversarial stage is several passes, not one** — red (break it), blue (would anything notice),
+yellow (is it built the way this project builds things), then the derived passes: purple (a regression
+test and a detection for every red finding), orange (the change that removes the whole class), green
+(is it deployed and integrated correctly), white (rules of engagement and who says done), black (the
+surface outside the repository). One reviewer wearing one hat finds one class of defect. Run red
+first; purple and orange consume its output and produce nothing without it.
+
 Fix the intake list from Step 1 here too — with a regression test per fix, per auto-issue-fix's
 discipline. A fix without a failing-then-passing test is a guess.
 
@@ -180,6 +187,7 @@ consent-laundering mechanism.
 | "The user said do everything, so I can ship" | Everything ends at ready. Shipping is a separate instruction |
 | "Running under one command, so I don't need to ask" | Gates are per action, not per invocation |
 | "One pass is enough this time" | It never has been. Run the cycle until it comes back empty |
+| "I reviewed it adversarially" | From which seat? Red, blue and yellow find different defects, and purple and orange only exist once red has run |
 | "The machine is busy but I'll start anyway" | Balance runs first for a reason |
 | "I'll claim the phone when I get to the media step" | Another window will have it by then, and the shots already taken will not match |
 | "I'll batch all the issue replies at the end" | That is the mass-comment pattern. Per-item approval still applies |
@@ -195,4 +203,5 @@ consent-laundering mechanism.
 - One giant uncommitted diff spanning every concern
 - Treating the orchestration as blanket approval for a sub-skill's gated action
 - Declaring the pass complete after one cycle
+- Collapsing the team passes into a single "adversarial review" and reporting it as all of them
 - Shipping anything — that is never this skill's call

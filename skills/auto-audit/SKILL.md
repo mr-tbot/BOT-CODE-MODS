@@ -1,6 +1,6 @@
 ---
 name: auto-audit
-description: "Use when a project must be driven to genuine completion on every platform it targets — user says \"finish this\", \"don't stop until it's done\", \"100% complete\", \"keep doing passes\", \"audit this until it's done\", \"/auto-audit\"; or when about to declare a feature done, a capability impossible, a platform unsupported, or a build ready to ship."
+description: "Use when a project must be driven to genuine completion on every platform it targets — user says \"finish this\", \"don't stop until it's done\", \"100% complete\", \"keep doing passes\", \"audit this until it's done\", \"/auto-audit\"; when they ask for a red-team, blue-team or multi-team pass over a project's correctness; or when about to declare a feature done, a capability impossible, a platform unsupported, or a build ready to ship."
 ---
 
 # /auto-audit
@@ -39,7 +39,9 @@ looked clean.
 3. **Build** — every target, every time. A green build on one target proves nothing about the rest.
 4. **Verify in the real environment** — run the actual thing on each target and read the actual
    logs. See below.
-5. **Adversarially review** — hunt for what the fix pass missed, assuming it missed something.
+5. **Adversarially review, by team** — hunt for what the fix pass missed, assuming it missed
+   something. One reviewer wearing one hat finds one class of defect; the team colours below are how
+   you get the other classes.
 6. **Go to 1.** Stop only when a complete pass finds nothing new on any target.
 
 **Targets you genuinely cannot reach** (no hardware, no license, no runner) get named explicitly,
@@ -62,6 +64,43 @@ was too shallow, not that the project is done.
 - Note every change needed in project media (video, screenshots, store listings, README assets, demo
   captures) that the new work invalidates. Stale media is an unfinished feature.
 - **Push / release / submit to any platform only on explicit user approval.** Report ready; do not ship.
+
+## The Team Passes
+
+Stage 5 is not one review, it is several, each run from a different seat. The colours come from the
+InfoSec colour wheel (April C. Wright, 2017): **red, blue and yellow are the primaries; purple,
+orange and green are what you get by combining them.** White is the referee — NIST defines a White
+Team as the group refereeing an engagement between a Red Team of mock attackers and a Blue Team of
+defenders. Black is **not** a standard term; it is used here for the surface that is not the code.
+
+The point is not ceremony. It is that each seat is blind to what the others see, and a project
+audited from one seat is a project whose other failure classes were never looked for.
+
+| Pass | The seat | What it asks of a feature that "works" |
+|---|---|---|
+| **Red** | breaker | What input, ordering or environment makes this fail? The unhappy path, the empty state, the second concurrent caller, the platform you did not develop on, the input a hostile user sends |
+| **Blue** | defender | When it does fail, does anything notice? Is there a log, an error surface, a metric, a recovery? Does it fail *safe*, or fail silently with a plausible-looking wrong answer? |
+| **Yellow** | builder | Is it built the way this project builds things — the existing helper, the existing pattern, the existing error type? Would the next maintainer find it where they expect? |
+| **Purple** | red + blue | For every break Red found: is there now a **regression test** that fails without the fix, and a way to *detect* it in the wild if it recurs? A fix with no detection is a fix you will make again |
+| **Orange** | yellow + red | For every break Red found: what would have to change about **how it is built** so the whole class cannot recur? One guard in the shared function beats a guard in every caller |
+| **Green** | yellow + blue | Is it deployed and integrated correctly on each target — packaging, permissions, config, migrations, first-run state? Code that is correct and shipped wrong is not finished |
+| **White** | referee | What are the rules of engagement, what counts as evidence, and who says "done"? Records what was out of scope and why, adjudicates disputes between passes, and holds the line that shipping is the user's call |
+| **Black** | outside the code | The surface the repository does not contain: physical devices and their state, the supply chain, out-of-band paths (a cron job, a webhook, a support tool), and the human step someone performs by hand |
+
+**How to run them without turning one audit into eight.** Run Red first — it produces the findings the
+others react to. Blue, Yellow and Green can run in parallel; they share no state. Purple and Orange
+are **derived** passes: they take Red's list as input and produce work items, so running them before
+Red is finished produces nothing. White runs once per full loop, not per pass. Black is often a short
+list of "not verifiable from here" — write it down anyway, because it is the surface that gets
+skipped precisely because it is inconvenient.
+
+**A pass that reports nothing is a result, but a suspicious one.** Red finding nothing on a feature
+with real inputs usually means Red was polite. Blue finding nothing usually means nothing is
+instrumented, which is itself the finding.
+
+Security has its own reading of the same wheel — attack surface, access control, secrets, compliance
+— and that belongs to **`/auto-audit-security`**. This skill's Red pass is about *correctness under
+hostile conditions*, not exploitation. Do not do both here; hand security findings across.
 
 ## What "Finished" Means
 
