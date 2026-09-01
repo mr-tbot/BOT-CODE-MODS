@@ -1105,36 +1105,77 @@ def _tokens(cmd: str) -> list[str]:
         return cmd.split()
 
 
+# A token is a command only in command position. Without this, `grep adb notes`
+# and `man adb` are denied — and a guard that fires on prose is a guard the user
+# turns off within the hour, after which it protects nothing.
+_SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "{", "}", "do", "then",
+               "else", "elif", "!"}
+# Wrappers that pass through to another command, which is the real invocation.
+_WRAPPERS = {"sudo", "doas", "env", "nohup", "setsid", "time", "timeout",
+             "command", "exec", "xargs", "stdbuf", "nice", "ionice"}
+
+
+def _command_positions(toks: list[str]) -> list[int]:
+    """Indices of tokens that are actually being invoked as a command."""
+    out, expect, skipping = [], True, False
+    for i, t in enumerate(toks):
+        if t in _SEPARATORS:
+            expect, skipping = True, False
+            continue
+        if not expect:
+            continue
+        base = os.path.basename(t.strip("'\""))
+        if base in _WRAPPERS:
+            skipping = True
+            continue                  # still expecting the real command
+        if "=" in t and not t.startswith("-") and re.match(r"^\w+=", t):
+            continue                  # VAR=value prefix
+        if skipping and (t.startswith("-") or re.fullmatch(r"[\d.]+[smhd]?", t)):
+            continue                  # a wrapper's own flags and durations
+        out.append(i)
+        expect = skipping = False
+    return out
+
+
 def _guard(cmd: str, mine: dict, devs: list[dict]) -> str | None:
-    """Return a refusal message, or None to allow. Conservative by design."""
+    """Return a refusal message, or None to allow.
+
+    Every command-position occurrence is checked, not just the first. A chain
+    like `adb devices && adb shell ls` opens with a harmless subcommand, and
+    stopping at the first match let the second one through — which is exactly
+    the shape a script uses to find a device and then drive it.
+    """
     toks = _tokens(cmd)
     if not toks:
         return None
     held_serials = {d.get("adb_serial") for d in mine.values() if d.get("adb_serial")}
     held_ttys = {d.get("tty") for d in mine.values() if d.get("tty")}
 
-    i = 0
-    while i < len(toks):
+    for i in _command_positions(toks):
         t = os.path.basename(toks[i].strip("'\""))
         kind = _DEVICE_TOOLS.get(t)
         if kind is None:
-            i += 1
             continue
         rest = toks[i + 1:]
+        # Stop at the next separator: the arguments of THIS invocation only.
+        cut = next((j for j, r in enumerate(rest) if r in _SEPARATORS), len(rest))
+        rest = rest[:cut]
+
         if t == "adb":
-            sub = next((r for r in rest if not r.startswith("-")), "")
-            if sub in _ADB_SAFE and "-s" not in rest:
-                return None
             if "kill-server" in rest:
                 return ("`adb kill-server` on a machine running several agent "
                         "sessions drops every other session's device mid-command. "
                         "Never run it here.")
             if "-s" in rest:
-                serial = rest[rest.index("-s") + 1] if len(rest) > rest.index("-s") + 1 else ""
+                k = rest.index("-s")
+                serial = rest[k + 1] if len(rest) > k + 1 else ""
                 if serial in held_serials:
-                    return None
+                    continue
                 return (f"this session does not hold the device '{serial}'. "
                         f"Run: devlock claim {serial} --why '<what for>'")
+            sub = next((r for r in rest if not r.startswith("-")), "")
+            if sub in _ADB_SAFE:
+                continue
             if held_serials:
                 return ("adb without -s picks a device for you. You hold "
                         + ", ".join(sorted(held_serials))
@@ -1146,6 +1187,7 @@ def _guard(cmd: str, mine: dict, devs: list[dict]) -> str | None:
                     f"one attached it works today and hits the wrong phone "
                     f"tomorrow. Run: devlock devices, then devlock claim <id> "
                     f"--why '<what for>'")
+
         if kind == "serial":
             port = next((r for r in rest if r.startswith("/dev/tty")), None)
             if port is None:
@@ -1153,23 +1195,23 @@ def _guard(cmd: str, mine: dict, devs: list[dict]) -> str | None:
                            if r in ("-p", "--port", "--device")), None)
                 port = rest[pi + 1] if pi is not None and pi + 1 < len(rest) else None
             if port and port in held_ttys:
-                return None
+                continue
             if port:
                 return (f"this session does not hold {port}. Claim it first: "
                         f"devlock claim {port} --why '<what for>'. Opening a "
                         f"board another session is flashing corrupts the flash.")
             if held_ttys:
-                return None      # a held board and no explicit port: let it run
+                continue          # a board is held and no other port was named
             return (f"`{t}` reaches a serial board and this session holds none. "
                     f"Run: devlock devices, then devlock claim <id>.")
+
         if kind == "ios":
             if t == "xcrun" and not any(r in ("devicectl", "simctl") for r in rest):
-                return None
+                continue
             if mine:
-                return None
+                continue
             return ("no iOS device is leased to this session. "
                     "Run: devlock devices, then devlock claim <id>.")
-        i += 1
     return None
 
 

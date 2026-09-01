@@ -6,9 +6,11 @@ set -u
 # Exit codes asserted below come from devlock's one table:
 #   0 OK  1 HELD-by-someone-else  2 FREE  4 POLICY  5 ABSENT  6 FENCED  7 UNHEALTHY
 DL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/devlock"
-export DEVLOCK_DIR="$(mktemp -d)"
+SCRATCH="$(mktemp -d)"
+export DEVLOCK_DIR="$SCRATCH/reg"
+mkdir -p "$DEVLOCK_DIR"
 export DEVLOCK_POLICY=/nonexistent
-trap 'rm -rf "$DEVLOCK_DIR"; for p in ${HOLDERS:-}; do kill -9 "$p" 2>/dev/null; done' EXIT
+trap 'rm -rf "$SCRATCH" "$DEVLOCK_DIR"; for p in ${HOLDERS:-}; do kill -9 "$p" 2>/dev/null; done' EXIT
 
 pass=0; fail=0
 ok()   { pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
@@ -113,6 +115,45 @@ if [ -n "$DEV" ]; then
   is "  and its lease is gone" "$ep" "0"
   DEVLOCK_SESSION_PID=$F $DL verify "$DEV" >/dev/null 2>&1
   is "the evicted session is told, not silently allowed" "$?" "6"
+fi
+
+echo "guard: command position"
+guard() {
+  printf '%s' "$(python3 -c 'import json,sys;print(json.dumps({"tool_name":"Bash","tool_input":{"command":sys.argv[1]}}))' "$1")" \
+    | "$DL" hook pre-bash | python3 -c 'import sys;print("DENY" if sys.stdin.read().strip() else "ALLOW")'
+}
+# A guard that fires on prose gets switched off, and then it protects nothing.
+for c in "grep adb notes.txt" "man adb" "which adb" "rg -n adb ." \
+         "echo see adb docs" "ls /opt/platform-tools/adb" "adb devices" "adb version"; do
+  is "allows: $c" "$(guard "$c")" "ALLOW"
+done
+# Every command-position occurrence is checked, not just the first: a chain that
+# opens with a harmless subcommand must not smuggle the next one through.
+for c in "adb shell ls" "cd /tmp && adb devices -l && adb shell ls" \
+         "sudo esptool.py --port /dev/ttyACM0 flash_id" \
+         "for i in 1 2; do adb shell ls; done" "adb kill-server" \
+         "nohup adb logcat &" "timeout 5 adb shell ls"; do
+  is "denies: $c" "$(guard "$c")" "DENY"
+done
+
+echo "guard: prefilter"
+HOOK="$(dirname "$DL")/devlock-hook"
+if [ -x "$HOOK" ]; then
+  pre() { printf '%s' "$1" | "$HOOK" pre-bash >/dev/null 2>&1; echo "$?"; }
+  is "a payload with no command key fails open" "$(pre '{"tool_name":"Bash"}')" "0"
+  is "an empty payload fails open"              "$(pre '')" "0"
+  is "invalid JSON fails open"                  "$(pre 'not json')" "0"
+  is "a command substitution is not evaluated" \
+     "$(pre '{"tool_input":{"command":"echo $(touch /tmp/aw-selftest-pwned)"}}'; \
+        [ -e /tmp/aw-selftest-pwned ] && echo INJECTED)" "0"
+  rm -f /tmp/aw-selftest-pwned
+  ok "an ordinary command skips python entirely (fast path)" \
+     "$(printf '%s' '{"tool_input":{"command":"git status"}}' | "$HOOK" pre-bash | wc -c)" 
+  cp "$HOOK" "$SCRATCH/dh" 2>/dev/null && \
+    sed -i 's|DEVLOCK="$DIR/devlock"|DEVLOCK="$DIR/missing"|' "$SCRATCH/dh" && \
+    chmod +x "$SCRATCH/dh"
+  printf '%s' '{"tool_input":{"command":"adb shell ls"}}' | "$SCRATCH/dh" pre-bash >/dev/null 2>&1
+  is "a missing devlock binary fails open" "$?" "0"
 fi
 
 echo "robustness"
