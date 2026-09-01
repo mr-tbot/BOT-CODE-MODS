@@ -248,9 +248,9 @@ offer to install the two hooks — and **ask before editing the user's settings*
 ```jsonc
 // ~/.claude/settings.json
 "SessionStart": [ { "hooks": [ { "type": "command",
-    "command": "~/.claude/skills/auto-device-lock/devlock hook session-start" } ] } ],
+    "command": "~/.claude/skills/auto-device-lock/devlock-hook session-start" } ] } ],
 "PreToolUse":   [ { "matcher": "Bash", "hooks": [ { "type": "command",
-    "command": "~/.claude/skills/auto-device-lock/devlock hook pre-bash" } ] } ]
+    "command": "~/.claude/skills/auto-device-lock/devlock-hook pre-bash" } ] } ]
 ```
 
 The first prints the device situation into every session's context. The second **denies** a Bash call
@@ -258,6 +258,11 @@ that reaches hardware this session has not leased, with a message naming the com
 is what turns a convention into something an agent cannot absent-mindedly skip. Both fail open: any
 internal error allows the command through, because a guard that blocks work when it breaks is a guard
 the user disables within the hour.
+
+Note the entry point is `devlock-hook`, not `devlock`. It is a shell prefilter that matches the
+command against the device tools with a `case` and only starts Python when one hits — 3 ms on an
+ordinary command instead of 55 ms. A guard that taxes every `git status` gets turned off, and a guard
+that is off protects nothing.
 
 **A lock only binds the sessions that run it.** If another window is on an older copy of this skill,
 or has no lock at all, it will take your device without ever seeing your lease. When that is possible,
