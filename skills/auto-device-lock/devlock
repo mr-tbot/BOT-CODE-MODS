@@ -663,7 +663,10 @@ def cmd_devices(args) -> int:
         extra = d.get("adb_serial") or d.get("tty", "")
         print(f"{d['id']:<34} {d['kind']:<10} {d.get('state',''):<9} "
               f"{d.get('model',''):<16} {extra:<22} {who}{flag}")
-        w = weak_serial(d["id"].split(":")[-1] if d["id"].startswith("usb:") else None)
+        # split(":", 2) — an ESP32-S3 reports a MAC as its serial, and splitting
+        # on every colon leaves "10", which reads as a 2-character serial and
+        # produces a false weak-identity warning on a perfectly unique device.
+        w = weak_serial(d["id"].split(":", 2)[2] if d["id"].startswith("usb:") else None)
         if w:
             print(f"{'':<34} ^ weak identity: {w}. Plug in a second unit of this "
                   f"model and confirm the ids differ before trusting the lock.")
